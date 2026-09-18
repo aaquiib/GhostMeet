@@ -87,6 +87,41 @@ chrome.storage.local.set({ backendUrl: "ws://localhost:8000/ws/transcribe" })
 // or: chrome.storage.local.remove("backendUrl") to fall back to that same default
 ```
 
+## Testing the ASR relay (Phase 2)
+
+`/ws/demo` skips real ASR entirely and streams the scripted transcript in
+`backend/fixtures/demo_transcript.json` (edit that file, not endpoint code, to change the demo
+script). Confirm it with any WebSocket client:
+
+```bash
+source backend/.venv/bin/activate
+python3 -c "
+import asyncio, websockets
+async def main():
+    async with websockets.connect('ws://localhost:8000/ws/demo') as ws:
+        async for msg in ws:
+            print(msg)
+asyncio.run(main())
+"
+```
+
+You should see one JSON transcript event roughly every 2 seconds.
+
+`/ws/transcribe` is the real path and needs working AWS Transcribe (or Deepgram) credentials in
+`backend/.env` — without them the connection announces a session id and then closes (the AWS
+call fails, it falls back to Deepgram, that fails too, and the socket closes with code 1011;
+watch the server log for the fallback warning). To test it without a live Google Meet call:
+
+```bash
+python3 scripts/feed_wav_file.py                          # uses the bundled sample WAV
+python3 scripts/feed_wav_file.py path/to/real_recording.wav
+```
+
+`scripts/sample_audio/two_speakers_sample.wav` is a synthetic placeholder (two alternating tones,
+not real speech) generated for this repo since no real recording was available — it proves the
+streaming/chunking plumbing works, not transcription quality. Swap in a real ~20s two-person
+recording to actually exercise ASR and diarization.
+
 ## Slack app
 
 `slack-app/manifest.yaml` is the starting app manifest (scopes, interactivity config). Slack app

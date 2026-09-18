@@ -1,0 +1,42 @@
+[
+  {
+    "speaker": "spk_0",
+    "text": "Hi everyone, I'm Sarah, I'll be leading the design review today.",
+    "confidence": 0.97
+  },
+  {
+    "speaker": "spk_1",
+    "text": "This is Mike from engineering, good to be here.",
+    "confidence": 0.96
+  },
+  {
+    "speaker": "spk_0",
+    "text": "Let's start with the API changes we discussed last week.",
+    "confidence": 0.95
+  },
+  {
+    "speaker": "spk_1",
+    "text": "Before we go further, Sarah, should we bump the rate limit to 1000 requests per minute or keep it at 500?",
+    "confidence": 0.93
+  },
+  {
+    "speaker": "spk_0",
+    "text": "Good question, let me think about the tradeoffs there for a second.",
+    "confidence": 0.94
+  },
+  {
+    "speaker": "spk_1",
+    "text": "Also, do we want to ship the new auth flow behind a feature flag or roll it out to everyone at once?",
+    "confidence": 0.92
+  },
+  {
+    "speaker": "spk_0",
+    "text": "I think a feature flag is safer for now, let's go with that.",
+    "confidence": 0.95
+  },
+  {
+    "speaker": "spk_1",
+    "text": "Sounds good, I'll get started on that this afternoon.",
+    "confidence": 0.96
+  }
+]

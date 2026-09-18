@@ -105,6 +105,32 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   tears down the whole capture pipeline (mic, audio graph, socket) rather than leaving it running
   with nowhere to send audio.
 
+**Phase 2 (backend streaming relay + ASR):**
+
+- **TranscriptEvent shape** (`backend/asr_base.py`), identical from both providers: `text: str`,
+  `speaker: str` (`"spk_N"` from provider diarization, or `"unknown"`; name inference from
+  self-intros is not done here — that's Phase 3's job), `timestamp: datetime` (wall-clock UTC at
+  the moment the event was finalized, not audio-relative seconds), `confidence: float`,
+  `is_partial: bool`, `meeting_id: str`.
+- **What reaches the client:** only final (`is_partial=False`) events, sent over `/ws/transcribe`
+  as JSON via `websocket.send_json(event.model_dump(mode="json"))`. Partials are produced
+  internally but dropped before the WebSocket — Phase 3 only ever sees finals.
+- **`/ws/transcribe` session handling:** optional `?session_id=` query param; omit it and the
+  server generates one and sends `{"meeting_session_id": "..."}` as the first message so the
+  client can persist it for reconnects. Supplying one is trusted as-is (no server-side session
+  registry yet — that's Phase 5) and always opens a NEW provider stream under that meeting_id.
+- **`/ws/demo`:** streams `backend/fixtures/demo_transcript.json` verbatim as TranscriptEvents,
+  one every 2s, `meeting_id="demo-meeting"`, `is_partial` always `False`. Edit that JSON file to
+  change the scripted demo, not the endpoint code.
+- **ASR_PROVIDER fallback:** `aws` (default) automatically falls back to Deepgram if
+  `AWSTranscribeProvider.start()` raises; `deepgram` uses Deepgram directly with no fallback.
+  Both require real credentials to actually produce transcripts — without them `get_asr_provider`
+  raises and `/ws/transcribe` closes with code 1011 after announcing the session id.
+- **Logging:** every log line for a `/ws/transcribe` or `/ws/demo` connection goes through
+  `MeetingLoggerAdapter` (`backend/asr_base.py`), which prefixes `[meeting_session_id=...]` to the
+  message text — not a `%(meeting_session_id)s` field in the global formatter, which would
+  `KeyError` on any other logger (uvicorn's, the AWS/Deepgram SDKs') that doesn't carry it.
+
 ## Conventions
 
 - One commit per completed phase, not mid-phase.
