@@ -8,12 +8,16 @@ oauth_config:
     bot:
       - chat:write
       - im:write
+      # slack_notifier.py resolves an email-based slack_target to a
+      # user ID via users.lookupByEmail before DMing them.
+      - users:read.email
 
 settings:
   interactivity:
     is_enabled: true
-    # Placeholder — replace with the real ngrok URL once phase 4 stands
-    # up slack_webhook.py's interaction endpoint.
+    # Placeholder — replace with the real ngrok URL once ngrok is
+    # running. slack_webhook.py's /slack/interaction endpoint (Phase 4)
+    # is what this should point at.
     request_url: https://<ngrok-url>/slack/interaction
   org_deploy_enabled: false
   socket_mode_enabled: false

@@ -3,7 +3,10 @@
 // downmix -> ScriptProcessorNode -> silent sink, never
 // audioContext.destination — that would play the meeting audio out
 // loud a second time), PCM16 encoding of each buffer, and the
-// WebSocket relay to the backend, including bounded reconnection.
+// WebSocket relay to the backend, including bounded reconnection. Also
+// owns sending the session_init identity handshake as the first
+// message on every (re)connection, and relaying speaker_override
+// submissions as control messages on the same socket.
 
 import {
   START_CAPTURE,
@@ -12,6 +15,7 @@ import {
   CAPTURE_STOPPED,
   CAPTURE_ERROR,
   CONNECTION_STATUS,
+  SPEAKER_OVERRIDE,
 } from './messages.js';
 
 const DEFAULT_BACKEND_URL = 'ws://localhost:8000/ws/transcribe';
@@ -51,6 +55,19 @@ function connectWebSocket(backendUrl) {
   ws.onopen = () => {
     if (!pipeline) return;
     pipeline.retryCount = 0;
+    // Must be the very first thing sent on this socket, before any
+    // audio bytes — onaudioprocess only sends once readyState is OPEN,
+    // and that can't happen before this synchronous onopen body (which
+    // just made it OPEN) finishes running, so ordering is guaranteed.
+    // Sent on every (re)connection, not just the first, since the
+    // backend expects it as the first frame of every new connection.
+    ws.send(
+      JSON.stringify({
+        type: 'session_init',
+        watched_user_name_variants: pipeline.watchedUserNameVariants,
+        slack_target: pipeline.slackTarget,
+      })
+    );
     broadcast({ type: CONNECTION_STATUS, status: 'connected' });
   };
 
@@ -74,7 +91,7 @@ function connectWebSocket(backendUrl) {
   return ws;
 }
 
-async function startCapture(streamId) {
+async function startCapture(streamId, watchedUserNameVariants, slackTarget) {
   const backendUrl = await getBackendUrl();
 
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -110,6 +127,8 @@ async function startCapture(streamId) {
     deliberateClose: false,
     retryCount: 0,
     backendUrl,
+    watchedUserNameVariants: watchedUserNameVariants ?? [],
+    slackTarget: slackTarget ?? null,
   };
 
   processor.onaudioprocess = (event) => {
@@ -155,12 +174,21 @@ chrome.runtime.onMessage.addListener((message) => {
 
   switch (message.type) {
     case START_CAPTURE:
-      startCapture(message.streamId).catch((error) => {
-        broadcast({ type: CAPTURE_ERROR, message: error.message || 'Failed to start capture' });
-      });
+      startCapture(message.streamId, message.watchedUserNameVariants, message.slackTarget).catch(
+        (error) => {
+          broadcast({ type: CAPTURE_ERROR, message: error.message || 'Failed to start capture' });
+        }
+      );
       break;
     case STOP_CAPTURE:
       stopCapture();
+      break;
+    case SPEAKER_OVERRIDE:
+      if (pipeline && pipeline.ws && pipeline.ws.readyState === WebSocket.OPEN) {
+        pipeline.ws.send(
+          JSON.stringify({ type: 'speaker_override', label: message.label, name: message.name })
+        );
+      }
       break;
     default:
       break;

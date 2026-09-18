@@ -9,3 +9,6 @@ export const CAPTURE_STARTED = 'CAPTURE_STARTED';
 export const CAPTURE_STOPPED = 'CAPTURE_STOPPED';
 export const CAPTURE_ERROR = 'CAPTURE_ERROR';
 export const CONNECTION_STATUS = 'CONNECTION_STATUS';
+// sidepanel -> background -> offscreen -> backend (as a WS control
+// message), the moment a speaker-override is submitted.
+export const SPEAKER_OVERRIDE = 'SPEAKER_OVERRIDE';

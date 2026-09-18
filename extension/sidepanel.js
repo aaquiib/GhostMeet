@@ -1,7 +1,9 @@
-// Side panel logic. Owns: the Start/Stop controls, and rendering
-// CAPTURE_STARTED / CAPTURE_STOPPED / CAPTURE_ERROR / CONNECTION_STATUS
-// as plain text in the status area — the seed of the "Ghost is
-// listening" indicator that Phase 6 will style properly.
+// Side panel logic. Owns: the one-time identity setup screen (gates
+// Start until a name + Slack target are saved), the Start/Stop
+// controls, rendering CAPTURE_STARTED / CAPTURE_STOPPED /
+// CAPTURE_ERROR / CONNECTION_STATUS as plain text in the status area
+// (the seed of the "Ghost is listening" indicator Phase 6 will style
+// properly), and the manual speaker-override input.
 
 import {
   START_CAPTURE,
@@ -10,13 +12,27 @@ import {
   CAPTURE_STOPPED,
   CAPTURE_ERROR,
   CONNECTION_STATUS,
+  SPEAKER_OVERRIDE,
 } from './messages.js';
 
 const SESSION_STATE_KEY = 'ghostSession';
+const IDENTITY_STORAGE_KEY = 'ghostIdentity';
 
+const setupScreen = document.getElementById('setup-screen');
+const setupNameInput = document.getElementById('setup-name');
+const setupNameVariantsInput = document.getElementById('setup-name-variants');
+const setupSlackTargetInput = document.getElementById('setup-slack-target');
+const setupSaveBtn = document.getElementById('setup-save-btn');
+const setupError = document.getElementById('setup-error');
+
+const mainScreen = document.getElementById('main-screen');
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
 const statusText = document.getElementById('status-text');
+
+const overrideLabelInput = document.getElementById('override-label');
+const overrideNameInput = document.getElementById('override-name');
+const overrideApplyBtn = document.getElementById('override-apply-btn');
 
 function showIdle() {
   startBtn.classList.remove('hidden');
@@ -31,6 +47,62 @@ function showCapturing() {
 function setStatus(text) {
   statusText.textContent = text;
 }
+
+// --- Identity setup -------------------------------------------------
+
+function showSetupScreen() {
+  setupScreen.classList.remove('hidden');
+  mainScreen.classList.add('hidden');
+}
+
+function showMainScreen() {
+  setupScreen.classList.add('hidden');
+  mainScreen.classList.remove('hidden');
+}
+
+setupSaveBtn.addEventListener('click', async () => {
+  const name = setupNameInput.value.trim();
+  const slackTarget = setupSlackTargetInput.value.trim();
+  const extraVariants = setupNameVariantsInput.value
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+  if (!name || !slackTarget) {
+    setupError.textContent = 'Both your name and a Slack user ID or email are required.';
+    setupError.classList.remove('hidden');
+    return;
+  }
+  setupError.classList.add('hidden');
+
+  // Dedup while preserving order, primary name first — Tier 1's regex
+  // (Phase 3) takes this whole list, not just one exact string.
+  const nameVariants = [...new Set([name, ...extraVariants])];
+
+  await chrome.storage.local.set({
+    [IDENTITY_STORAGE_KEY]: { name, nameVariants, slackTarget },
+  });
+
+  showMainScreen();
+});
+
+// --- Speaker override -------------------------------------------------
+
+overrideApplyBtn.addEventListener('click', () => {
+  const label = overrideLabelInput.value.trim();
+  const name = overrideNameInput.value.trim();
+  if (!label || !name) return;
+
+  // Sent the moment it's submitted, not held until session end —
+  // background.js relays it to offscreen.js, which sends it as a
+  // control message on the already-open WebSocket.
+  chrome.runtime.sendMessage({ type: SPEAKER_OVERRIDE, target: 'background', label, name });
+
+  overrideLabelInput.value = '';
+  overrideNameInput.value = '';
+});
+
+// --- Start/Stop + status -------------------------------------------------
 
 startBtn.addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: START_CAPTURE, target: 'background' });
@@ -91,4 +163,14 @@ async function restoreState() {
   }
 }
 
-restoreState();
+async function init() {
+  const { [IDENTITY_STORAGE_KEY]: identity } = await chrome.storage.local.get(IDENTITY_STORAGE_KEY);
+  if (identity && identity.name && identity.slackTarget) {
+    showMainScreen();
+    await restoreState();
+  } else {
+    showSetupScreen();
+  }
+}
+
+init();

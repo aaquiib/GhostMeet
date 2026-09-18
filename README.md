@@ -47,16 +47,23 @@ pytest
 3. Click "Load unpacked" and select the `extension/` directory.
 4. Confirm "AI Meeting Ghost" appears with no errors, and that its icon shows up in the toolbar.
 5. Open a `meet.google.com` tab (a real or empty call works), then click the extension's toolbar
-   icon — the side panel should open. Nothing starts capturing yet at this point.
-6. Click "Start listening". Chrome should prompt for tab-audio capture permission the first
+   icon — the side panel should open.
+6. First time only: fill in the identity setup screen — your name (Tier 1's watch-name regex uses
+   this), optional other name variants, and your Slack user ID or email — then "Save & Continue".
+   This is stored in `chrome.storage.local` and only asked once; Start is hidden until it's filled
+   in. Nothing starts capturing yet at this point.
+7. Click "Start listening". Chrome should prompt for tab-audio capture permission the first
    time; after that the status area should read "Ghost is listening." Confirm you do **not**
    hear the meeting audio play a second time — that would mean the audio graph is wired to
    `audioContext.destination` instead of the silent sink, which must never happen.
-7. Click "Stop Ghost" — the status should return to "Ghost is idle." and the Start button should
+8. Try the speaker-override input (below the status area) — enter a label like `spk_0` and a name,
+   click Apply. Check the backend log for "speaker override applied" to confirm it reached the
+   server mid-session.
+9. Click "Stop Ghost" — the status should return to "Ghost is idle." and the Start button should
    reappear. Closing the Meet tab (or navigating it away from meet.google.com) while capturing
    should trigger the same automatic stop.
-8. Check `chrome://extensions` → service worker "Inspect views" and the offscreen document's
-   console for errors during the above.
+10. Check `chrome://extensions` → service worker "Inspect views" and the offscreen document's
+    console for errors during the above.
 
 ## Testing audio capture without the real backend (Phase 1)
 
@@ -91,14 +98,21 @@ chrome.storage.local.set({ backendUrl: "ws://localhost:8000/ws/transcribe" })
 
 `/ws/demo` skips real ASR entirely and streams the scripted transcript in
 `backend/fixtures/demo_transcript.json` (edit that file, not endpoint code, to change the demo
-script). Confirm it with any WebSocket client:
+script). Every connection — demo or real — now requires a `session_init` control message first
+(Phase 4; see below), so a bare client needs to send that before anything else. Confirm it with
+any WebSocket client:
 
 ```bash
 source backend/.venv/bin/activate
 python3 -c "
-import asyncio, websockets
+import asyncio, json, websockets
 async def main():
     async with websockets.connect('ws://localhost:8000/ws/demo') as ws:
+        await ws.send(json.dumps({
+            'type': 'session_init',
+            'watched_user_name_variants': ['Sarah'],  # matches the demo script
+            'slack_target': 'you@example.com',
+        }))
         async for msg in ws:
             print(msg)
 asyncio.run(main())
@@ -115,7 +129,12 @@ watch the server log for the fallback warning). To test it without a live Google
 ```bash
 python3 scripts/feed_wav_file.py                          # uses the bundled sample WAV
 python3 scripts/feed_wav_file.py path/to/real_recording.wav
+python3 scripts/feed_wav_file.py --watch-name Aman --watch-name "Aman Kumar" --slack-target you@example.com
 ```
+
+It sends the mandatory `session_init` handshake (Phase 4) before any audio; `--watch-name` is
+repeatable and defaults to a name that won't match real speech, since this script is for
+exercising ASR — pass your own name too if you also want it to exercise decision detection.
 
 `scripts/sample_audio/two_speakers_sample.wav` is a synthetic placeholder (two alternating tones,
 not real speech) generated for this repo since no real recording was available — it proves the
@@ -133,9 +152,9 @@ cd backend && source .venv/bin/activate && pytest tests/test_decision_detector.p
 ```
 
 Detection is off by default per session — `DecisionPipeline.set_watch_names(meeting_id, names)`
-must be called with the names to watch for, or Tier 1 never matches anything. `/ws/demo` calls
-this automatically (watching for `"Sarah"`, matching its scripted transcript); nothing currently
-calls it for real `/ws/transcribe` sessions.
+must be called with the names to watch for, or Tier 1 never matches anything. As of Phase 4 this
+is driven by the `session_init` handshake below, for both `/ws/demo` and real `/ws/transcribe`
+sessions.
 
 With `ASR_PROVIDER` and `LLM_API_KEY` both pointing at real, working credentials, running
 `scripts/feed_wav_file.py` against a real two-person recording exercises the full path — audio →
@@ -143,6 +162,48 @@ transcript → decision detection — and any detected batch gets logged to the 
 appended to `backend/decisions_log.jsonl` (gitignored). A wrong/missing `LLM_API_KEY` fails
 gracefully: Tier 2 logs the failure and the window is treated as "not a decision" rather than
 crashing the session.
+
+## Session identity + Cedar/Slack notification (Phase 4)
+
+Every `/ws/transcribe` and `/ws/demo` connection now requires a `session_init` control message as
+its first client-sent frame:
+
+```json
+{
+  "type": "session_init",
+  "watched_user_name_variants": ["Aman", "Aman Kumar"],
+  "slack_target": "aman@example.com"
+}
+```
+
+Missing it, or sending anything else first, gets a `{"type": "error", ...}` reply and the socket
+closes (code 1008) — there's no silent fallback to a hardcoded name. A `speaker_override` control
+message (`{"type": "speaker_override", "label": "spk_0", "name": "Priya"}`) can follow at any
+point later in the same connection and takes effect immediately.
+
+Run the Phase 4 tests (all fake the LLM/Slack calls, so no credentials needed):
+
+```bash
+cd backend && source .venv/bin/activate
+pytest tests/test_session_init.py tests/test_notification_pipeline.py tests/test_slack_webhook.py -v
+```
+
+To actually receive a Slack DM end-to-end, you'll need:
+
+1. Real `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET` in `backend/.env`, and a Slack app installed from
+   `slack-app/manifest.yaml` (includes `chat:write`, `im:write`, `users:read.email`).
+2. `ngrok http 8000` (or similar) to get a public URL, and the Slack app's Interactivity request
+   URL updated to `https://<ngrok-url>/slack/interaction` — a manual step in the Slack app config
+   (see CLAUDE.md conventions).
+3. A real `LLM_API_KEY` — both decision detection (Tier 2) and answer drafting call it.
+4. A `session_init` whose `watched_user_name_variants` actually appears in the transcript (the
+   bundled demo script says "Sarah"), and a real `slack_target` (your Slack user ID or email) to
+   receive the DM.
+
+`backend/policies/decisions.cedar` forbids `hiring`-classified decisions as a working example of
+a real deny — edit it to add more rules; `cedar_policy.check_decision_policy` fails closed on any
+parse/evaluation error, so a broken policy file blocks notifications rather than allowing them
+through.
 
 ## Slack app
 

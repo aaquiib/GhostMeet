@@ -134,15 +134,15 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 **Phase 3 (decision detection):**
 
 - **LLM model:** CLAUDE.md's "Claude 3 Haiku" is retired — Tier 2 uses `claude-haiku-4-5`
-  (`backend/decision_detector.py`, constant `_LLM_MODEL`), the current latency-optimized model in
-  the same tier. Called via the `anthropic` SDK (added to `requirements.txt`, pinned `1.6.0`) with
+  (`backend/decision_detector.py`, constant `LLM_MODEL`, public — Phase 4's answer_drafter.py
+  reuses it and `LLM_TIMEOUT_SECONDS`), the current latency-optimized model in the same tier.
+  Called via the `anthropic` SDK (added to `requirements.txt`, pinned `1.6.0`) with
   `output_config={"format": {"type": "json_schema", ...}}` for structured JSON, wrapped in
   `asyncio.wait_for(..., timeout=4.0)`.
 - **Per-session name watching is not automatic:** `DecisionPipeline.set_watch_names(meeting_id,
-  names)` must be called before Tier 1 will ever match anything — without it, no decisions are
-  ever detected for that session. Nothing currently calls this for real `/ws/transcribe` sessions
-  (only `/ws/demo` does, hardcoded to `["Sarah"]` to match the demo script). Phase 6's side panel
-  (or some earlier wiring) needs to collect the user's name and call this per real session.
+  names)` must be called before Tier 1 will ever match anything. Phase 4's session_init handshake
+  (see below) is what actually calls this for real sessions now — see that section, not this one,
+  for how identity reaches a session.
 - **Buffering window:** carry-forward is literally prepended into the next window's buffer (not a
   separate context list) — `state.buffer = window_events[-3:]` after each close — so both Tier 1's
   regex and Tier 2's LLM call see carried lines alongside new ones. Window closes at 30s elapsed
@@ -165,6 +165,70 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   (gitignored, placeholder only). Phase 4 replaces the callback the shared `decision_pipeline`
   singleton (`backend/decision_detector.py`) is constructed with; nothing else in this file needs
   to change.
+
+**Phase 4 (session identity + Cedar/Slack notification):**
+
+- **session_init handshake:** the first message on every `/ws/transcribe` and `/ws/demo`
+  connection (after the server's own `{"meeting_session_id": ...}` announcement on
+  `/ws/transcribe`) must be
+  `{"type": "session_init", "watched_user_name_variants": [...], "slack_target": "..."}` from the
+  client. Missing/malformed/absent → the server sends `{"type": "error", "message": "..."}` and
+  closes with code 1008. No silent fallback to a hardcoded name, ever — see
+  `main.py`'s `_handshake_session_init`. This is what actually calls
+  `decision_pipeline.set_watch_names`/`set_slack_target` for a session now.
+- **Per-session identity lives in `DecisionPipeline`'s `_SessionState`** (`slack_target` field,
+  alongside the existing `watch_names_pattern`), never in the process-wide `Settings` object —
+  Settings is shared across every concurrent meeting, so it can't hold a per-meeting value.
+  `decision_pipeline.get_slack_target(meeting_id)` is how the notification pipeline looks it up.
+- **Control messages after the handshake:** `/ws/transcribe`'s receive loop now inspects each
+  frame's raw type (`websocket.receive()`, not `receive_bytes()` — Phase 2's assumption that every
+  frame is audio is obsolete) so binary audio and JSON control messages (currently just
+  `{"type": "speaker_override", "label": "spk_0", "name": "Priya"}`) can interleave.
+  `decision_detector.handle_control_message(meeting_id, payload, log)` routes these — both
+  `/ws/transcribe` and `/ws/demo` call it, so routing logic lives in one place.
+- **Extension side:** `chrome.storage.local` key `ghostIdentity` = `{ name, nameVariants,
+  slackTarget }`, written by the sidepanel's one-time setup screen (gates the Start button).
+  `background.js` reads it and includes `watchedUserNameVariants`/`slackTarget` on the
+  `START_CAPTURE` message to offscreen.js, which sends `session_init` as the first WS frame on
+  every (re)connection — including reconnects, since the backend expects it as the first frame of
+  every new connection, not just the session's first. A new `SPEAKER_OVERRIDE` message type
+  (`extension/messages.js`) carries a speaker-override submission from sidepanel through
+  background to offscreen, which sends it as a `speaker_override` control message immediately.
+- **DecisionStoreLike (structural typing, not an import):** `decision_detector.py` defines a
+  `Protocol` with just `create()` rather than importing `decision_store.py`, because
+  `decision_store.py` needs `DecisionRecord` from `decision_detector.py` — importing both
+  directions would cycle. `main.py` is what actually connects them at startup
+  (`decision_pipeline.set_decision_store(decision_store)`), not either module importing the other.
+  The same reasoning is why `main.py` (not `decision_detector.py`) constructs
+  `make_notification_pipeline(decision_store)` and assigns it to
+  `decision_pipeline.on_decision_batch`.
+- **JSONLDecisionStore is append-only, "latest line wins":** `update_status` doesn't edit
+  `decisions_log.jsonl` in place — it appends the record again with the new status. The in-memory
+  index (rebuilt from the file at startup) keeps only the latest line per `id`, so this gives
+  correct current-state semantics without needing in-place file edits. `approved_by` is accepted
+  and logged but not persisted on the record itself — Phase 3's `DecisionRecord` intentionally has
+  no field for it; Phase 5's real schema can add one.
+- **Cedar policy set is a plain reassignable module global** (`cedar_policy._POLICY_SET`), parsed
+  once at import — not wrapped in a function — specifically so tests can simulate a corrupt
+  `decisions.cedar` by monkeypatching it to a malformed string (`cedarpy.is_authorized` accepts a
+  raw string and parses it internally, so this hits the exact same failure path a bad file would).
+  `check_decision_policy` fails closed on literally any exception.
+  `policies/decisions.cedar` forbids `resource.decision_type == "hiring"` as the one example rule;
+  everything else is permitted by default — edit freely.
+- **Decision persistence timing:** `decision_store.create()` is called as soon as a decision is
+  accepted (in `_classify_and_batch`, right after the dedup check passes) — not delayed until the
+  debounce timer fires. The timer is purely a notification-batching concern; persistence
+  shouldn't wait on it. A persistence failure is logged but doesn't block batching/notification.
+- **`answer_drafter.draft_answer`'s "search"** is keyword-overlap re-ranking of
+  `decision_store.get_recent(meeting_id, limit=10)`'s results in memory — not a second store
+  method. Keeps the store interface to exactly the 3 methods in the spec; Phase 5 swaps the
+  ranking step for real OpenSearch relevance search without changing the interface.
+- **`python-multipart` added to `requirements.txt`** (pinned `0.0.20`) — required transitively by
+  Starlette's `Request.form()`, which `/slack/interaction` needs to parse Slack's
+  `application/x-www-form-urlencoded` payload.
+- **Slack scopes:** `slack-app/manifest.yaml` needs `users:read.email` in addition to
+  `chat:write`/`im:write` — `slack_notifier.py` resolves an email `slack_target` via
+  `users.lookupByEmail` before DMing.
 
 ## Conventions
 

@@ -15,6 +15,14 @@ streaming plumbing works, not transcription quality.
 
 Usage:
     python3 scripts/feed_wav_file.py [wav_path] [--url ws://host:port/ws/transcribe]
+        [--watch-name NAME ...] [--slack-target you@example.com]
+
+Sends the mandatory session_init handshake (Phase 4) before any audio
+— the backend rejects a connection that sends anything else first.
+--watch-name can be repeated for multiple name variants; defaults to
+a name that won't match anything in real speech, since the point of
+this script is exercising ASR, not decision detection (pass your own
+name to also exercise that).
 
 Requires `websockets` (already in backend/requirements.txt — run from
 backend/.venv). Uses only the stdlib otherwise (wave + audioop) so it
@@ -59,7 +67,7 @@ def load_pcm16_mono_16khz(wav_path: Path) -> bytes:
     return raw
 
 
-async def feed(wav_path: Path, url: str) -> None:
+async def feed(wav_path: Path, url: str, watch_names: list[str], slack_target: str) -> None:
     pcm = load_pcm16_mono_16khz(wav_path)
     chunk_bytes = CHUNK_SAMPLES * 2
     chunk_duration_s = CHUNK_SAMPLES / TARGET_SAMPLE_RATE
@@ -68,6 +76,15 @@ async def feed(wav_path: Path, url: str) -> None:
     print(f"Streaming {wav_path} — {len(chunks)} chunks (~{len(pcm) / 2 / TARGET_SAMPLE_RATE:.1f}s of audio)")
 
     async with websockets.connect(url) as ws:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "session_init",
+                    "watched_user_name_variants": watch_names,
+                    "slack_target": slack_target,
+                }
+            )
+        )
 
         async def send_audio():
             for chunk in chunks:
@@ -81,6 +98,9 @@ async def feed(wav_path: Path, url: str) -> None:
                 event = json.loads(raw)
                 if "meeting_session_id" in event:
                     print(f"[session] {event['meeting_session_id']}")
+                    continue
+                if event.get("type") == "error":
+                    print(f"[error] {event['message']}")
                     continue
                 marker = "partial" if event.get("is_partial") else "FINAL"
                 print(f"[{marker}] {event['speaker']}: {event['text']!r} (confidence={event['confidence']:.2f})")
@@ -100,6 +120,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wav_path", nargs="?", default=str(DEFAULT_WAV))
     parser.add_argument("--url", default=DEFAULT_URL)
+    parser.add_argument(
+        "--watch-name",
+        action="append",
+        dest="watch_names",
+        default=None,
+        help="Name variant to watch for (repeatable). Defaults to a name that won't match real speech.",
+    )
+    parser.add_argument("--slack-target", default="test@example.com")
     args = parser.parse_args()
 
     wav_path = Path(args.wav_path)
@@ -107,4 +135,5 @@ if __name__ == "__main__":
         print(f"WAV file not found: {wav_path}", file=sys.stderr)
         sys.exit(1)
 
-    asyncio.run(feed(wav_path, args.url))
+    watch_names = args.watch_names or ["Nobody Matching This Name"]
+    asyncio.run(feed(wav_path, args.url, watch_names, args.slack_target))

@@ -1,10 +1,11 @@
 // Service worker. Owns: opening the side panel on icon click,
 // starting/stopping tabCapture on the active Meet tab, creating and
-// closing the offscreen document, relaying start/stop to offscreen.js,
-// tracking capture state in chrome.storage.session (so a service-worker
-// restart doesn't lose track of an in-progress session), and
-// auto-stopping capture if the captured tab closes or navigates away
-// from meet.google.com.
+// closing the offscreen document, relaying start/stop (plus the
+// stored identity and later speaker-override submissions) to
+// offscreen.js, tracking capture state in chrome.storage.session (so a
+// service-worker restart doesn't lose track of an in-progress
+// session), and auto-stopping capture if the captured tab closes or
+// navigates away from meet.google.com.
 
 import {
   START_CAPTURE,
@@ -12,10 +13,15 @@ import {
   CAPTURE_STARTED,
   CAPTURE_STOPPED,
   CAPTURE_ERROR,
+  SPEAKER_OVERRIDE,
 } from './messages.js';
 
 const SESSION_STATE_KEY = 'ghostSession';
 const IDLE_STATE = { status: 'idle', meetingSessionId: null, tabId: null };
+// Written by sidepanel.js's one-time setup screen: { name, nameVariants,
+// slackTarget }. Read here so it can ride along on START_CAPTURE —
+// offscreen.js owns the WebSocket and sends it on as session_init.
+const IDENTITY_STORAGE_KEY = 'ghostIdentity';
 
 async function getSessionState() {
   const { [SESSION_STATE_KEY]: state } = await chrome.storage.session.get(SESSION_STATE_KEY);
@@ -75,11 +81,15 @@ async function startCapture() {
   const meetingSessionId = crypto.randomUUID();
   await setSessionState({ status: 'capturing', meetingSessionId, tabId: tab.id });
 
+  const { [IDENTITY_STORAGE_KEY]: identity } = await chrome.storage.local.get(IDENTITY_STORAGE_KEY);
+
   chrome.runtime.sendMessage({
     type: START_CAPTURE,
     target: 'offscreen',
     streamId,
     meetingSessionId,
+    watchedUserNameVariants: identity?.nameVariants ?? [],
+    slackTarget: identity?.slackTarget ?? null,
   });
 }
 
@@ -103,6 +113,16 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
     case STOP_CAPTURE:
       if (message.target === 'background') stopCapture();
+      break;
+    case SPEAKER_OVERRIDE:
+      if (message.target === 'background') {
+        chrome.runtime.sendMessage({
+          type: SPEAKER_OVERRIDE,
+          target: 'offscreen',
+          label: message.label,
+          name: message.name,
+        });
+      }
       break;
     case CAPTURE_STARTED:
       if (message.target === 'sidepanel') setSessionState({ status: 'capturing' });

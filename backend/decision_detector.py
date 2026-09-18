@@ -1,13 +1,22 @@
 """
 Owns decision detection: DecisionRecord (the shape Phase 4/5 consume),
-SpeakerMapper (self-intro name inference), and DecisionPipeline — the
-per-session buffering/two-tier-trigger/dedup/debounce state machine
-that turns a stream of final TranscriptEvents into batched decisions.
+SpeakerMapper (self-intro name inference, plus manual overrides),
+and DecisionPipeline — the per-session buffering/two-tier-trigger/
+dedup/debounce state machine that turns a stream of final
+TranscriptEvents into batched decisions.
 
-Does not call Slack or Cedar. DecisionPipeline hands finished batches
-to an injected on_decision_batch callback; default_on_decision_batch is
-a placeholder (console + decisions_log.jsonl) that Phase 4 replaces
-without touching this file.
+Still does not call Slack or Cedar directly. DecisionPipeline persists
+each accepted decision via an injected DecisionStoreLike (structural
+typing — no import of decision_store.py, to avoid a cycle) and hands
+finished batches to an injected on_decision_batch callback; both are
+wired in by main.py at startup. default_on_decision_batch remains the
+placeholder default (console + decisions_log.jsonl) for anything that
+doesn't wire in the real notification pipeline.
+
+Also owns per-session identity: set_watch_names/set_slack_target are
+populated from the session_init WebSocket handshake (Part A, in
+main.py), and handle_control_message() routes later speaker_override
+messages to SpeakerMapper — both /ws/transcribe and /ws/demo call it.
 """
 
 import asyncio
@@ -19,7 +28,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, Literal
+from typing import Awaitable, Callable, Iterable, Literal, Protocol
 
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
@@ -105,9 +114,10 @@ def _build_name_pattern(names: list[str]) -> re.Pattern | None:
 # --- Tier 2: LLM classification ----------------------------------------
 
 # Claude 3 Haiku (named in CLAUDE.md) is retired; Haiku 4.5 is the
-# current latency-optimized model in the same tier.
-_LLM_MODEL = "claude-haiku-4-5"
-_LLM_TIMEOUT_SECONDS = 4.0  # Phase 0 latency benchmark; 4s default per spec
+# current latency-optimized model in the same tier. Public (no leading
+# underscore) — answer_drafter.py's second LLM call reuses both.
+LLM_MODEL = "claude-haiku-4-5"
+LLM_TIMEOUT_SECONDS = 4.0  # Phase 0 latency benchmark; 4s default per spec
 
 _SYSTEM_PROMPT = """You are analyzing a short window of a live meeting transcript to detect whether it contains a decision or question that needs a specific person's input.
 
@@ -203,6 +213,14 @@ def _log_task_exception(task: "asyncio.Task") -> None:
         logger.error("decision pipeline background task failed: %r", exc)
 
 
+# --- Decision store (structural typing — no import of decision_store.py,
+# to avoid a cycle; decision_store.py needs DecisionRecord from here) ------
+
+
+class DecisionStoreLike(Protocol):
+    async def create(self, decision: "DecisionRecord") -> None: ...
+
+
 # --- Per-session state ----------------------------------------------------
 
 _WINDOW_SECONDS = 30
@@ -220,6 +238,10 @@ class _SessionState:
     recent_decisions: deque = field(default_factory=lambda: deque(maxlen=_DEDUP_LEDGER_SIZE))
     pending_batch: list = field(default_factory=list)
     batch_timer_task: "asyncio.Task | None" = None
+    # Set from the session_init WebSocket handshake (Part A) — never
+    # from the process-wide Settings object, which would only support
+    # one watched user per backend instance.
+    slack_target: str | None = None
 
 
 # --- Pipeline --------------------------------------------------------------
@@ -235,9 +257,11 @@ class DecisionPipeline:
         self,
         on_decision_batch: DecisionBatchCallback = default_on_decision_batch,
         llm_client: "anthropic.AsyncAnthropic | None" = None,
+        decision_store: "DecisionStoreLike | None" = None,
     ) -> None:
         self.on_decision_batch = on_decision_batch
         self._llm_client = llm_client or anthropic.AsyncAnthropic(api_key=settings.llm_api_key)
+        self._decision_store = decision_store
         self._sessions: dict[str, _SessionState] = {}
         # Keeps references to in-flight Tier-2/batch tasks so they
         # aren't garbage-collected mid-flight, and so failures surface
@@ -262,10 +286,27 @@ class DecisionPipeline:
         state.watch_names_pattern = _build_name_pattern(names)
 
     def set_speaker_name(self, meeting_id: str, speaker_label: str, name: str) -> None:
-        """Manual speaker-mapping override — for a future side-panel
-        manual-entry option."""
+        """Manual speaker-mapping override — driven by the side panel's
+        speaker-override input (Part A), routed here via
+        handle_control_message()."""
         state = self._get_or_create_session(meeting_id)
         state.speaker_mapper.set_mapping(speaker_label, name)
+
+    def set_slack_target(self, meeting_id: str, slack_target: str) -> None:
+        """Set from the session_init handshake — the Slack user ID or
+        email this session's notifications should go to."""
+        state = self._get_or_create_session(meeting_id)
+        state.slack_target = slack_target
+
+    def get_slack_target(self, meeting_id: str) -> str | None:
+        state = self._sessions.get(meeting_id)
+        return state.slack_target if state else None
+
+    def set_decision_store(self, decision_store: "DecisionStoreLike") -> None:
+        """Wired in by main.py at startup, not imported here directly —
+        decision_store.py needs DecisionRecord from this module, so this
+        module stays independent of decision_store.py to avoid a cycle."""
+        self._decision_store = decision_store
 
     def _track(self, coro: "Awaitable") -> "asyncio.Task":
         task = asyncio.create_task(coro)
@@ -305,7 +346,7 @@ class DecisionPipeline:
         if not state.watch_names_pattern or not state.watch_names_pattern.search(window_text):
             return
 
-        # Tier 2 (the LLM call) can take up to _LLM_TIMEOUT_SECONDS to
+        # Tier 2 (the LLM call) can take up to LLM_TIMEOUT_SECONDS to
         # resolve. Run it in the background rather than awaiting it
         # here, so the transcript stream is never held up waiting on
         # a slow LLM response.
@@ -319,19 +360,19 @@ class DecisionPipeline:
         try:
             response = await asyncio.wait_for(
                 self._llm_client.messages.create(
-                    model=_LLM_MODEL,
+                    model=LLM_MODEL,
                     max_tokens=1024,
                     system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": transcript_text}],
                     output_config={"format": {"type": "json_schema", "schema": _CLASSIFICATION_SCHEMA}},
                 ),
-                timeout=_LLM_TIMEOUT_SECONDS,
+                timeout=LLM_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "[meeting_id=%s] LLM classification timed out after %.1fs; treating window as not a decision",
                 meeting_id,
-                _LLM_TIMEOUT_SECONDS,
+                LLM_TIMEOUT_SECONDS,
             )
             return None
         except Exception:
@@ -410,6 +451,16 @@ class DecisionPipeline:
             if state.batch_timer_task is None or state.batch_timer_task.done():
                 state.batch_timer_task = self._track(self._fire_batch_after_delay(meeting_id, state))
 
+        if self._decision_store is not None:
+            # Persisted as soon as it's accepted, not delayed until the
+            # debounce timer fires — that timer is purely a
+            # notification-batching concern. Best-effort: a persistence
+            # failure shouldn't block the batch/notification flow below.
+            try:
+                await self._decision_store.create(record)
+            except Exception:
+                logger.exception("[meeting_id=%s] failed to persist decision %s", meeting_id, record.id)
+
     async def _fire_batch_after_delay(self, meeting_id: str, state: _SessionState) -> None:
         await asyncio.sleep(settings.debounce_window_seconds)
 
@@ -423,3 +474,22 @@ class DecisionPipeline:
 
 
 decision_pipeline = DecisionPipeline()
+
+
+def handle_control_message(meeting_id: str, payload: dict, log: logging.Logger) -> None:
+    """Dispatches a parsed WebSocket control-message payload for this
+    session — currently just speaker_override. session_init itself is
+    handled by the handshake in main.py before the session starts, not
+    here. Shared by /ws/transcribe and /ws/demo (both call this — see
+    main.py and demo_mode.py) so the routing logic lives in one place."""
+    msg_type = payload.get("type")
+    if msg_type == "speaker_override":
+        label = payload.get("label")
+        name = payload.get("name")
+        if label and name:
+            decision_pipeline.set_speaker_name(meeting_id, label, name)
+            log.info("speaker override applied: %s -> %s", label, name)
+        else:
+            log.warning("malformed speaker_override message: %r", payload)
+    else:
+        log.warning("unknown control message type: %r", payload)

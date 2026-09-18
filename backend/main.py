@@ -1,9 +1,13 @@
 """
 FastAPI app entrypoint. Importing `config` here first means a missing
 required credential raises immediately on startup, not on first use.
+Also where the notification pipeline (Cedar + drafting + Slack) is
+wired into Phase 3's DecisionPipeline, replacing its placeholder
+console-logging callback.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 
@@ -11,8 +15,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from asr_base import MeetingLoggerAdapter
 from config import settings  # noqa: F401  (import triggers validation)
-from decision_detector import decision_pipeline
-from demo_mode import run_demo_session
+from decision_detector import decision_pipeline, handle_control_message
+from decision_store import decision_store
+from demo_mode import DEMO_MEETING_ID, run_demo_session
+from notification_pipeline import make_notification_pipeline
+from slack_webhook import router as slack_webhook_router
 from transcribe_handler import get_asr_provider
 
 logging.basicConfig(
@@ -21,12 +28,62 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ghost.main")
 
+# Real notification pipeline (Cedar-gate -> draft -> Slack) replaces
+# Phase 3's placeholder console logger; every accepted decision is
+# also persisted via decision_store regardless of the callback.
+decision_pipeline.on_decision_batch = make_notification_pipeline(decision_store)
+decision_pipeline.set_decision_store(decision_store)
+
 app = FastAPI(title="AI Meeting Ghost")
+app.include_router(slack_webhook_router)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def _reject_missing_session_init(websocket: WebSocket) -> None:
+    await websocket.send_json(
+        {
+            "type": "error",
+            "message": (
+                "First message must be a session_init control message with "
+                "watched_user_name_variants and slack_target"
+            ),
+        }
+    )
+    await websocket.close(code=1008)
+
+
+async def _handshake_session_init(websocket: WebSocket, log) -> dict | None:
+    """Reads the mandatory session_init control message that must be the
+    first frame from the client — before any audio bytes on
+    /ws/transcribe, before the scripted transcript on /ws/demo. Returns
+    its data, or None after already sending an error and closing the
+    socket. No silent fallback to a hardcoded name: an old/mismatched
+    client is a bug that must fail loudly, not quietly misattribute
+    every decision to nobody in particular."""
+    try:
+        init_data = await websocket.receive_json()
+    except Exception:
+        log.warning("no session_init received as first message; closing")
+        await _reject_missing_session_init(websocket)
+        return None
+
+    if not isinstance(init_data, dict) or init_data.get("type") != "session_init":
+        log.warning("first message was not session_init: %r", init_data)
+        await _reject_missing_session_init(websocket)
+        return None
+
+    names = init_data.get("watched_user_name_variants")
+    slack_target = init_data.get("slack_target")
+    if not names or not isinstance(names, list) or not slack_target:
+        log.warning("session_init missing required fields: %r", init_data)
+        await _reject_missing_session_init(websocket)
+        return None
+
+    return {"watched_user_name_variants": names, "slack_target": slack_target}
 
 
 @app.websocket("/ws/transcribe")
@@ -45,6 +102,18 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
 
     log = MeetingLoggerAdapter(logger, {"meeting_session_id": meeting_session_id})
 
+    init = await _handshake_session_init(websocket, log)
+    if init is None:
+        return
+
+    decision_pipeline.set_watch_names(meeting_session_id, init["watched_user_name_variants"])
+    decision_pipeline.set_slack_target(meeting_session_id, init["slack_target"])
+    log.info(
+        "session_init received: names=%s slack_target=%s",
+        init["watched_user_name_variants"],
+        init["slack_target"],
+    )
+
     try:
         provider = await get_asr_provider(meeting_session_id, log)
     except Exception:
@@ -55,10 +124,29 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
     log.info("ASR provider started (%s)", type(provider).__name__)
 
     async def receive_loop() -> None:
+        # Audio (binary) and control messages like speaker_override
+        # (text/JSON) can now arrive interleaved on the same socket, so
+        # this inspects each frame's type via the raw receive() rather
+        # than assuming every frame is audio (Phase 2's simpler
+        # receive_bytes()-only loop, now obsolete).
         try:
             while True:
-                data = await websocket.receive_bytes()
-                await provider.send_audio(data)
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                data = message.get("bytes")
+                if data is not None:
+                    await provider.send_audio(data)
+                    continue
+                text = message.get("text")
+                if text is None:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    log.warning("ignoring malformed control message: %r", text)
+                    continue
+                handle_control_message(meeting_session_id, payload, log)
         except WebSocketDisconnect:
             log.info("client disconnected")
 
@@ -105,4 +193,19 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
 
 @app.websocket("/ws/demo")
 async def ws_demo(websocket: WebSocket):
-    await run_demo_session(websocket)
+    await websocket.accept()
+    log = MeetingLoggerAdapter(logger, {"meeting_session_id": DEMO_MEETING_ID})
+
+    init = await _handshake_session_init(websocket, log)
+    if init is None:
+        return
+
+    decision_pipeline.set_watch_names(DEMO_MEETING_ID, init["watched_user_name_variants"])
+    decision_pipeline.set_slack_target(DEMO_MEETING_ID, init["slack_target"])
+    log.info(
+        "session_init received: names=%s slack_target=%s",
+        init["watched_user_name_variants"],
+        init["slack_target"],
+    )
+
+    await run_demo_session(websocket, log)
