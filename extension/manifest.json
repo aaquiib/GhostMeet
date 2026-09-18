@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "AI Meeting Ghost",
+  "version": "0.1.0",
+  "description": "Listens to a Google Meet call you have open, detects decisions that need your input, and notifies you on Slack with a drafted answer.",
+  "permissions": ["tabCapture", "offscreen", "sidePanel", "storage", "tabs"],
+  "host_permissions": ["*://meet.google.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "AI Meeting Ghost"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

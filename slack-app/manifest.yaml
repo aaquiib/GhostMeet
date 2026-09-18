@@ -1,0 +1,20 @@
+display_information:
+  name: AI Meeting Ghost
+  description: Notifies you on Slack when a Google Meet call needs your decision, with a drafted answer to approve, edit, or override.
+  background_color: "#6c5ce7"
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - im:write
+
+settings:
+  interactivity:
+    is_enabled: true
+    # Placeholder — replace with the real ngrok URL once phase 4 stands
+    # up slack_webhook.py's interaction endpoint.
+    request_url: https://<ngrok-url>/slack/interaction
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
