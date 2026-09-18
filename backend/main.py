@@ -11,6 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from asr_base import MeetingLoggerAdapter
 from config import settings  # noqa: F401  (import triggers validation)
+from decision_detector import decision_pipeline
 from demo_mode import run_demo_session
 from transcribe_handler import get_asr_provider
 
@@ -68,6 +69,11 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
                 # final results continue downstream.
                 continue
             await websocket.send_json(event.model_dump(mode="json"))
+            # process_transcript_event only ever blocks synchronously
+            # on cheap buffering/regex work — the LLM call it may
+            # trigger runs as an internally-managed background task,
+            # so this never delays the transcript stream above.
+            await decision_pipeline.process_transcript_event(event)
 
     receive_task = asyncio.create_task(receive_loop())
     transcript_task = asyncio.create_task(transcript_loop())

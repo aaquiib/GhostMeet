@@ -17,11 +17,18 @@ from pathlib import Path
 from fastapi import WebSocket, WebSocketDisconnect
 
 from asr_base import MeetingLoggerAdapter, TranscriptEvent
+from decision_detector import decision_pipeline
 
 logger = logging.getLogger("ghost.demo")
 
 DEMO_MEETING_ID = "demo-meeting"
 SEND_INTERVAL_SECONDS = 2
+
+# The scripted transcript (fixtures/demo_transcript.json) has Sarah
+# self-introduce and then get asked two decision-shaped questions by
+# name — watch for her name so the demo path also exercises detection,
+# not just transcript streaming.
+_DEMO_WATCH_NAMES = ["Sarah"]
 
 # Scripted lines live as their own JSON fixture, not inline in this
 # module, so the demo script is easy to edit without touching session
@@ -40,6 +47,7 @@ async def run_demo_session(websocket: WebSocket) -> None:
     log.info("demo session started")
 
     script = _load_script()
+    decision_pipeline.set_watch_names(DEMO_MEETING_ID, _DEMO_WATCH_NAMES)
 
     try:
         for line in script:
@@ -53,6 +61,7 @@ async def run_demo_session(websocket: WebSocket) -> None:
             )
             await websocket.send_json(event.model_dump(mode="json"))
             log.info("sent demo event: %s: %r", event.speaker, event.text)
+            await decision_pipeline.process_transcript_event(event)
             await asyncio.sleep(SEND_INTERVAL_SECONDS)
     except WebSocketDisconnect:
         log.info("client disconnected")

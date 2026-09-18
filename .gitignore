@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 node_modules/
 ghost.db
+decisions_log.jsonl
 .venv/

@@ -131,6 +131,41 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   message text — not a `%(meeting_session_id)s` field in the global formatter, which would
   `KeyError` on any other logger (uvicorn's, the AWS/Deepgram SDKs') that doesn't carry it.
 
+**Phase 3 (decision detection):**
+
+- **LLM model:** CLAUDE.md's "Claude 3 Haiku" is retired — Tier 2 uses `claude-haiku-4-5`
+  (`backend/decision_detector.py`, constant `_LLM_MODEL`), the current latency-optimized model in
+  the same tier. Called via the `anthropic` SDK (added to `requirements.txt`, pinned `1.6.0`) with
+  `output_config={"format": {"type": "json_schema", ...}}` for structured JSON, wrapped in
+  `asyncio.wait_for(..., timeout=4.0)`.
+- **Per-session name watching is not automatic:** `DecisionPipeline.set_watch_names(meeting_id,
+  names)` must be called before Tier 1 will ever match anything — without it, no decisions are
+  ever detected for that session. Nothing currently calls this for real `/ws/transcribe` sessions
+  (only `/ws/demo` does, hardcoded to `["Sarah"]` to match the demo script). Phase 6's side panel
+  (or some earlier wiring) needs to collect the user's name and call this per real session.
+- **Buffering window:** carry-forward is literally prepended into the next window's buffer (not a
+  separate context list) — `state.buffer = window_events[-3:]` after each close — so both Tier 1's
+  regex and Tier 2's LLM call see carried lines alongside new ones. Window closes at 30s elapsed
+  (by event timestamp, not wall clock) or 10 segments, whichever first.
+- **Debounce timer is real wall-clock**, `asyncio.sleep(settings.debounce_window_seconds)` (12s
+  default), separate from the window-closing logic above. Tests shorten
+  `settings.debounce_window_seconds` directly (it's a mutable pydantic-settings singleton) rather
+  than waiting 12 real seconds.
+- **Never blocks the transcript stream:** `DecisionPipeline.process_transcript_event` only ever
+  blocks synchronously on cheap buffering + a regex check; Tier 2's LLM call and everything after
+  it (dedup, batching) runs as an internally-tracked background `asyncio.Task`. `main.py`'s
+  `transcript_loop` awaits it inline — that's safe precisely because it never blocks meaningfully.
+- **DecisionRecord** (`backend/decision_detector.py`) is the shape Phase 4/5 consume: `id`
+  (server-generated uuid4), `meeting_id`, `decision_text`, `speaker` (resolved via SpeakerMapper —
+  a name if self-introduced, else the raw `spk_N` label), `requires_action_from`, `context`,
+  `confidence`, `urgency`, `timestamp`, `status` (default `"pending"`). No Slack/DB-specific
+  fields — don't add any when wiring Phase 4.
+- **Output callback:** `DecisionPipeline(on_decision_batch=...)` — default
+  (`default_on_decision_batch`) logs each batch and appends to `backend/decisions_log.jsonl`
+  (gitignored, placeholder only). Phase 4 replaces the callback the shared `decision_pipeline`
+  singleton (`backend/decision_detector.py`) is constructed with; nothing else in this file needs
+  to change.
+
 ## Conventions
 
 - One commit per completed phase, not mid-phase.

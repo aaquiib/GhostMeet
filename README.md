@@ -122,6 +122,28 @@ not real speech) generated for this repo since no real recording was available �
 streaming/chunking plumbing works, not transcription quality. Swap in a real ~20s two-person
 recording to actually exercise ASR and diarization.
 
+## Testing decision detection (Phase 3)
+
+`backend/decision_detector.py` turns final transcript events into batched `DecisionRecord`s. Its
+own unit tests (`backend/tests/test_decision_detector.py`) fake the LLM call, so they run fast
+and need no credentials:
+
+```bash
+cd backend && source .venv/bin/activate && pytest tests/test_decision_detector.py -v
+```
+
+Detection is off by default per session — `DecisionPipeline.set_watch_names(meeting_id, names)`
+must be called with the names to watch for, or Tier 1 never matches anything. `/ws/demo` calls
+this automatically (watching for `"Sarah"`, matching its scripted transcript); nothing currently
+calls it for real `/ws/transcribe` sessions.
+
+With `ASR_PROVIDER` and `LLM_API_KEY` both pointing at real, working credentials, running
+`scripts/feed_wav_file.py` against a real two-person recording exercises the full path — audio →
+transcript → decision detection — and any detected batch gets logged to the server console and
+appended to `backend/decisions_log.jsonl` (gitignored). A wrong/missing `LLM_API_KEY` fails
+gracefully: Tier 2 logs the failure and the window is treated as "not a decision" rather than
+crashing the session.
+
 ## Slack app
 
 `slack-app/manifest.yaml` is the starting app manifest (scopes, interactivity config). Slack app
