@@ -8,11 +8,14 @@ is already sent.
 import time
 import urllib.parse
 import uuid
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
 import main
+import session_connections
 import slack_webhook
+from decision_detector import DecisionRecord
 
 client = TestClient(main.app)
 
@@ -93,6 +96,79 @@ def test_reject_button_updates_decision_status(monkeypatch):
         time.sleep(0.05)
 
     assert calls == [(decision_id, "rejected", "U_REJECTER")]
+
+
+def test_approve_button_pushes_decision_status_update_to_panel(monkeypatch):
+    decision_id = uuid.uuid4()
+    updated_record = DecisionRecord(
+        id=decision_id,
+        meeting_id="panel-push-meeting",
+        decision_text="Whether to test the push",
+        speaker="spk_0",
+        requires_action_from="Sarah",
+        context="ctx",
+        confidence=0.9,
+        urgency="medium",
+        timestamp=datetime.now(timezone.utc),
+        status="approved",
+    )
+
+    async def fake_update_status(decision_id_arg, status, approved_by):
+        return updated_record
+
+    monkeypatch.setattr(slack_webhook.decision_store, "update_status", fake_update_status)
+
+    pushes = []
+
+    async def fake_push(meeting_id, message):
+        pushes.append((meeting_id, message))
+
+    monkeypatch.setattr(session_connections, "push", fake_push)
+
+    body = _interaction_body("decision_approve", f"{decision_id}:approve", user_id="U_APPROVER")
+    headers = _signed_headers(body)
+
+    response = client.post("/slack/interaction", content=body, headers=headers)
+    assert response.status_code == 200
+
+    for _ in range(20):
+        if pushes:
+            break
+        time.sleep(0.05)
+
+    assert pushes == [
+        (
+            "panel-push-meeting",
+            {
+                "type": "decision_status_update",
+                "decision_id": str(decision_id),
+                "status": "approved",
+                "approved_by": "U_APPROVER",
+            },
+        )
+    ]
+
+
+def test_unknown_decision_id_does_not_push(monkeypatch):
+    async def fake_update_status(decision_id_arg, status, approved_by):
+        return None  # unknown decision_id
+
+    monkeypatch.setattr(slack_webhook.decision_store, "update_status", fake_update_status)
+
+    pushes = []
+
+    async def fake_push(meeting_id, message):
+        pushes.append((meeting_id, message))
+
+    monkeypatch.setattr(session_connections, "push", fake_push)
+
+    body = _interaction_body("decision_approve", f"{uuid.uuid4()}:approve")
+    headers = _signed_headers(body)
+
+    response = client.post("/slack/interaction", content=body, headers=headers)
+    assert response.status_code == 200
+    time.sleep(0.2)
+    assert pushes == []
 
 
 def test_join_meeting_button_is_a_noop(monkeypatch):

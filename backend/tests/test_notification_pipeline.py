@@ -23,6 +23,7 @@ import pytest
 
 import answer_drafter
 import cedar_policy
+import session_connections
 import slack_notifier
 from config import settings
 from decision_detector import decision_pipeline
@@ -98,6 +99,17 @@ def captured_slack_calls(monkeypatch):
     monkeypatch.setattr(slack_notifier._client, "chat_postMessage", fake_post_message)
     monkeypatch.setattr(slack_notifier._client, "users_lookupByEmail", fake_lookup_email)
     return calls
+
+
+@pytest.fixture
+def captured_panel_pushes(monkeypatch):
+    pushes = []
+
+    async def fake_push(meeting_id, message):
+        pushes.append((meeting_id, message))
+
+    monkeypatch.setattr(session_connections, "push", fake_push)
+    return pushes
 
 
 def _wire_pipeline(monkeypatch, classify_fn, decision_store):
@@ -243,3 +255,70 @@ async def test_draft_timeout_still_sends_with_fallback_text(monkeypatch, fake_de
     blocks = captured_slack_calls[0]["blocks"]
     section = next(b for b in blocks if b["type"] == "section")
     assert "No draft available" in section["text"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_allowed_decision_pushes_decision_batch_with_drafted_answer(
+    monkeypatch, fake_decision_store, captured_slack_calls, captured_panel_pushes
+):
+    expected_text = "Whether to ship on Friday or wait until Monday"
+
+    def classify_fn(content):
+        return {
+            "is_decision": True,
+            "requires_action_from": "Sarah",
+            "decision_text": expected_text,
+            "context": "ctx",
+            "confidence": 0.9,
+            "urgency": "medium",
+        }
+
+    _wire_pipeline(monkeypatch, classify_fn, fake_decision_store)
+
+    with _short_debounce(0.1):
+        for event in one_clear_decision():
+            await decision_pipeline.process_transcript_event(event)
+        await asyncio.sleep(0.5)
+
+    batch_pushes = [p for p in captured_panel_pushes if p[1]["type"] == "decision_batch"]
+    assert len(batch_pushes) == 1
+    meeting_id, message = batch_pushes[0]
+    assert meeting_id == MEETING_ID
+    assert len(message["decisions"]) == 1
+    pushed = message["decisions"][0]
+    assert pushed["decision_text"] == expected_text
+    assert pushed["status"] == "pending"
+    assert pushed["drafted_answer"] == "Go with Friday. Source: no prior context."
+
+
+@pytest.mark.asyncio
+async def test_denied_decision_pushes_decision_batch_without_drafted_answer(
+    monkeypatch, fake_decision_store, captured_slack_calls, captured_panel_pushes
+):
+    monkeypatch.setattr(cedar_policy, "_POLICY_SET", "this is not valid cedar")
+
+    def classify_fn(content):
+        return {
+            "is_decision": True,
+            "requires_action_from": "Sarah",
+            "decision_text": "Whether to ship on Friday or wait until Monday",
+            "context": "ctx",
+            "confidence": 0.9,
+            "urgency": "medium",
+        }
+
+    _wire_pipeline(monkeypatch, classify_fn, fake_decision_store)
+
+    with _short_debounce(0.1):
+        for event in one_clear_decision():
+            await decision_pipeline.process_transcript_event(event)
+        await asyncio.sleep(0.5)
+
+    # No Slack message (already covered elsewhere), but the panel
+    # still gets the batch so it can show the denied_by_policy badge.
+    assert captured_slack_calls == []
+    batch_pushes = [p for p in captured_panel_pushes if p[1]["type"] == "decision_batch"]
+    assert len(batch_pushes) == 1
+    pushed = batch_pushes[0][1]["decisions"][0]
+    assert pushed["drafted_answer"] is None
+    assert pushed["status"] == "denied_by_policy"

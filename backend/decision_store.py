@@ -45,12 +45,15 @@ class DecisionStore(ABC):
     @abstractmethod
     async def update_status(
         self, decision_id: uuid.UUID, status: str, approved_by: str | None
-    ) -> None:
+    ) -> "DecisionRecord | None":
         """Update a decision's status (e.g. "approved", "rejected",
-        "denied_by_policy"). approved_by is logged for audit purposes;
-        the schema has a column for it but DecisionRecord (Phase 3's
-        shape, consumed as-is by everything upstream) doesn't — it's
-        never round-tripped back out through get_recent."""
+        "denied_by_policy") and return the updated record (None if
+        decision_id is unknown) — Phase 6's slack_webhook.py needs the
+        record's meeting_id to push the update to the right side panel
+        connection. approved_by is logged for audit purposes; the
+        schema has a column for it but DecisionRecord (Phase 3's shape,
+        consumed as-is by everything upstream) doesn't — it's never
+        round-tripped back out through get_recent."""
 
 
 def _row_to_record(row: "database.Decision") -> DecisionRecord:
@@ -110,7 +113,7 @@ class SQLiteDecisionStore(DecisionStore):
 
     async def update_status(
         self, decision_id: uuid.UUID, status: str, approved_by: str | None
-    ) -> None:
+    ) -> DecisionRecord | None:
         async with database.async_session_maker() as session:
             result = await session.execute(
                 select(database.Decision).where(database.Decision.id == str(decision_id))
@@ -118,7 +121,7 @@ class SQLiteDecisionStore(DecisionStore):
             row = result.scalar_one_or_none()
             if row is None:
                 logger.warning("update_status: unknown decision_id %s", decision_id)
-                return
+                return None
             row.status = status
             row.approved_by = approved_by
             await session.commit()
@@ -129,6 +132,7 @@ class SQLiteDecisionStore(DecisionStore):
         logger.info(
             "decision %s status -> %s (approved_by=%s)", decision_id, status, approved_by
         )
+        return updated_record
 
 
 decision_store = SQLiteDecisionStore()

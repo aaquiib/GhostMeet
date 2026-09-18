@@ -4,7 +4,10 @@ interactivity payloads (button clicks: approve/reject/join) from
 Slack's request URL, verifies the request signature against
 SLACK_SIGNING_SECRET using the raw body, and responds immediately —
 the actual decision_store update runs afterward via BackgroundTasks so
-Slack never times out waiting and retries the same click.
+Slack never times out waiting and retries the same click. That same
+background task also pushes the update to the side panel's WebSocket
+connection, so approving/rejecting from Slack is reflected live there
+too, not just in Slack.
 """
 
 import json
@@ -14,6 +17,7 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, Request, Response
 from slack_sdk.signature import SignatureVerifier
 
+import session_connections
 from config import settings
 from decision_store import decision_store
 
@@ -73,6 +77,21 @@ async def slack_interaction(request: Request, background_tasks: BackgroundTasks)
 
     # Respond to Slack first; update afterward so the click is never
     # held up on (or retried because of) a slow store write.
-    background_tasks.add_task(decision_store.update_status, decision_id, status, user_id)
+    background_tasks.add_task(_update_status_and_notify_panel, decision_id, status, user_id)
 
     return Response(status_code=200)
+
+
+async def _update_status_and_notify_panel(decision_id: uuid.UUID, status: str, user_id: str) -> None:
+    updated = await decision_store.update_status(decision_id, status, user_id)
+    if updated is None:
+        return
+    await session_connections.push(
+        updated.meeting_id,
+        {
+            "type": "decision_status_update",
+            "decision_id": str(decision_id),
+            "status": status,
+            "approved_by": user_id,
+        },
+    )

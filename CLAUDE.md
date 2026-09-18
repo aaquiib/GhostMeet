@@ -288,6 +288,94 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   against `docker-compose`'s OpenSearch — it skips itself when unreachable rather than failing the
   suite, so it'll actually run and verify the real thing for anyone with Docker available.
 
+**Phase 6 (side panel UI):**
+
+- **`backend/session_connections.py` is a new module owning the registry** mapping
+  `meeting_session_id` -> the live WebSocket for that session on `/ws/transcribe`/`/ws/demo`, so
+  code that doesn't hold the WebSocket directly (`notification_pipeline.py`, `slack_webhook.py`)
+  can still push a message down it. `main.py` registers on successful `session_init` and
+  unregisters in every exit path (`finally`), including the ASR-provider-startup-failure path.
+  Unregister only removes the connection if it's still the caller's own — a reconnect may already
+  have registered a newer one under the same `meeting_id` by the time an old connection's cleanup
+  runs. Pushing to a `meeting_id` with no registered connection (panel never opened, or the
+  connection already ended) is not an error — it's logged and dropped; `GET /decisions` is what
+  backfills a panel that (re)opens later, live pushes are additive on top of that.
+- **`decision_store.DecisionStore.update_status` now returns the updated record (or `None` for an
+  unknown id)**, not `None` unconditionally — `slack_webhook.py` needs the record's `meeting_id` to
+  know which session to push `decision_status_update` to, and it isn't otherwise available at the
+  call site (only `decision_id`/`status`/`approved_by` are).
+- **`notification_pipeline.py` pushes one `decision_batch` message per batch**, after Cedar +
+  drafting finish, containing every decision in the batch — allowed *and* denied, so the panel can
+  show the correct status badge for both — as full `DecisionRecord` dicts plus an extra
+  `drafted_answer` key (allowed decisions only; `None` for denied). This push happens before the
+  `if not allowed: return` early exit, so a denied-only batch still reaches the panel.
+  `drafted_answer` is deliberately not part of `DecisionRecord` itself (Phase 3/4 keep drafts
+  un-persisted) — it's added only on the pushed JSON, reusing the same draft already computed for
+  Slack rather than drafting twice. A denied decision's in-memory `.status` is mutated to
+  `"denied_by_policy"` right after its `update_status()` DB write succeeds (only on success, same
+  as the existing try/except) — without this the pushed payload would show the pre-denial
+  `"pending"` status even though the DB and Slack-side state both correctly show denied.
+- **`slack_webhook.py` pushes `decision_status_update`** via a new
+  `_update_status_and_notify_panel` wrapper (what `BackgroundTasks` now calls instead of
+  `decision_store.update_status` directly): updates the DB, then — only if the id was recognized —
+  pushes `{"type": "decision_status_update", "decision_id", "status", "approved_by"}` to that
+  decision's `meeting_id` via `session_connections.push`.
+- **`GET /decisions?meeting_id=` is a new endpoint** (thin wrapper over Phase 5's
+  `decision_store.get_recent(meeting_id, limit=200)`) added specifically to hydrate the panel's
+  list on open/reopen, since live pushes alone can't backfill state from before the panel was
+  open. Not called out explicitly in earlier phases' specs, but required by this one's "fetch GET
+  /decisions on load" requirement — same minimal-addition-when-justified precedent as `httpx`/
+  `python-multipart`/`aiohttp` in prior phases. Historical decisions from it never carry
+  `drafted_answer` (never persisted); only ones pushed live while the panel is open do.
+- **CORS is handled via `extension/manifest.json`'s `host_permissions`** (`http://localhost:8000/*`
+  added), not `CORSMiddleware` in `main.py` — Chrome MV3 extension pages with a matching host
+  permission bypass CORS entirely for `fetch()`, so this stays entirely on the extension side and
+  doesn't touch backend logic beyond the push wiring above.
+- **`extension/messages.js` gains three constants** (`SESSION_ID_ASSIGNED`, `DECISION_BATCH`,
+  `DECISION_STATUS_UPDATE`) for `offscreen.js` -> `sidepanel.js` relays of backend WS pushes — kept
+  distinct from the backend's own wire-format strings (`"decision_batch"`, etc.) so the
+  offscreen<->sidepanel contract doesn't depend on the backend's JSON shape.
+- **`offscreen.js` gained a `ws.onmessage` handler** (there was none before this phase — Phase 2-5
+  only ever sent audio, never read anything back except via the message types already covered).
+  Every server->client frame is JSON; it's told apart by shape: no `type` field but a
+  `meeting_session_id` string means the session-id announcement (relayed as
+  `SESSION_ID_ASSIGNED`), `type: "decision_batch"`/`"decision_status_update"` are relayed as their
+  matching constants, and anything else (transcript events, `type: "error"`) is left alone — not
+  this phase's concern.
+- **The side panel tracks the backend-confirmed session id under a new `chrome.storage.session`
+  key, `ghostPanelSessionId`** — deliberately distinct from `background.js`'s own `ghostSession`
+  key. `ghostSession.meetingSessionId` is generated client-side (`crypto.randomUUID()`) purely for
+  background.js's own capturing/idle/error state tracking; it's never actually sent to the backend
+  (`offscreen.js`'s `startCapture` doesn't take or forward it, and the WS connection carries no
+  `?session_id=` query param), so it is *not* the id `GET /decisions`/`GET /search` need to be
+  scoped by. `ghostPanelSessionId` is set only from the backend's own `SESSION_ID_ASSIGNED`
+  announcement (or, for demo mode, opportunistically from the first `decision_batch` push's
+  `meeting_id`, since `/ws/demo` never sends that announcement — only `/ws/transcribe` does).
+- **`sidepanel.js` is one `panelState` object + one `render(state)` function.** Every message
+  handler and user interaction mutates `panelState` then calls `render(panelState)` — no ad-hoc DOM
+  writes inside handlers. `upsertDecision(state, decision)` (replace in place by `id`, else append)
+  is the only way `panelState.decisions` is ever modified, for both `DECISION_BATCH` (upsert each
+  decision) and `DECISION_STATUS_UPDATE` (upsert a merged `{...existing, status, approved_by}`
+  record — falls back to a partial `{id, status, approved_by}` if the id isn't already known,
+  which is what "upsert" naturally does rather than a special case). A decision landing on
+  `approved`/`answered_live` sets it as `activeDecisionId`, which is what drives the
+  triggered/answered expanded view above the list.
+- **All decision-derived text (`decision_text`, `speaker`, drafted answers) is inserted via
+  `textContent`**, never `innerHTML` string interpolation — this content originates from meeting
+  transcripts and LLM output and must be treated as untrusted (XSS). `sidepanel.js`'s only
+  `innerHTML` uses are `= ''` clears before rebuilding a container from scratch.
+- **`sidepanel.css` is a new file** (previously inline `<style>` in `sidepanel.html`, now moved
+  out) — near-black background, cyan for pending/listening, green for approved, plus muted
+  gray/red/violet for rejected/denied_by_policy/answered_live so all five status badges stay
+  visually distinct.
+- **Search (P2) is 300ms-debounced**, fires `GET /search?q=&meeting_id=` only at 2+ characters
+  after the debounce settles, and stores results in `panelState.searchResults` (`null` = show the
+  full list; an array, even empty, = show search results instead). Clearing the query sets
+  `searchResults` back to `null`, restoring the full list from `panelState.decisions` without a
+  network call. Note `main.py`'s `/search` route doesn't actually filter by `meeting_id` (Phase 5
+  didn't add that parameter, and this phase doesn't touch backend search logic) — the panel sends
+  it per spec, but search results may span meetings until a later phase adds real filtering.
+
 ## Conventions
 
 - One commit per completed phase, not mid-phase.

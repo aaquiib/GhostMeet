@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Listens to a Google Meet call you have open, detects decisions that need your input, and notifies you on Slack with a drafted answer.",
   "permissions": ["tabCapture", "offscreen", "sidePanel", "storage", "tabs"],
-  "host_permissions": ["*://meet.google.com/*"],
+  "host_permissions": ["*://meet.google.com/*", "http://localhost:8000/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

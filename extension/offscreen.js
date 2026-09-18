@@ -16,6 +16,9 @@ import {
   CAPTURE_ERROR,
   CONNECTION_STATUS,
   SPEAKER_OVERRIDE,
+  SESSION_ID_ASSIGNED,
+  DECISION_BATCH,
+  DECISION_STATUS_UPDATE,
 } from './messages.js';
 
 const DEFAULT_BACKEND_URL = 'ws://localhost:8000/ws/transcribe';
@@ -69,6 +72,49 @@ function connectWebSocket(backendUrl) {
       })
     );
     broadcast({ type: CONNECTION_STATUS, status: 'connected' });
+  };
+
+  // Every server->client frame is JSON here (audio only ever flows
+  // client->server): the session-id announcement (no "type" field, just
+  // {meeting_session_id}), decision_batch/decision_status_update pushes,
+  // transcript events, and error messages all arrive on this same
+  // handler and are told apart by shape/"type" rather than needing
+  // separate sockets or endpoints.
+  ws.onmessage = (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (!payload || typeof payload !== 'object') return;
+
+    if (!payload.type && typeof payload.meeting_session_id === 'string') {
+      broadcast({ type: SESSION_ID_ASSIGNED, sessionId: payload.meeting_session_id });
+      return;
+    }
+
+    switch (payload.type) {
+      case 'decision_batch':
+        broadcast({
+          type: DECISION_BATCH,
+          meetingId: payload.meeting_id,
+          decisions: payload.decisions,
+        });
+        break;
+      case 'decision_status_update':
+        broadcast({
+          type: DECISION_STATUS_UPDATE,
+          decisionId: payload.decision_id,
+          status: payload.status,
+          approvedBy: payload.approved_by,
+        });
+        break;
+      default:
+        // Transcript events and "error" messages aren't this phase's
+        // concern — left for whichever future phase relays them.
+        break;
+    }
   };
 
   ws.onclose = () => {

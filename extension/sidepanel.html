@@ -1,70 +1,14 @@
 <!DOCTYPE html>
-<!-- Side panel UI. Minimal for this phase: a one-time identity setup
-     screen (gates Start until filled in), a Start/Stop control, a
-     plain-text status area (the seed of the "Ghost is listening"
-     consent indicator — Phase 6 styles this properly), and a manual
-     speaker-override input. -->
+<!-- Side panel UI: one-time identity setup screen (gates Start until
+     filled in), Start/Stop controls, the "Ghost is listening" consent
+     indicator, the live/historical decision list, the triggered/
+     answered expanded view, and search (P2). Styling lives entirely in
+     sidepanel.css — this file only carries structure. -->
 <html>
   <head>
     <meta charset="utf-8" />
     <title>AI Meeting Ghost</title>
-    <style>
-      body {
-        font-family: system-ui, sans-serif;
-        padding: 16px;
-      }
-      button {
-        font-size: 14px;
-        padding: 8px 16px;
-        cursor: pointer;
-      }
-      label {
-        display: block;
-        margin-top: 12px;
-        font-size: 13px;
-      }
-      input[type='text'] {
-        display: block;
-        width: 100%;
-        box-sizing: border-box;
-        margin-top: 4px;
-        padding: 6px;
-        font-size: 14px;
-      }
-      #setup-save-btn {
-        margin-top: 16px;
-      }
-      #setup-error {
-        margin-top: 8px;
-        color: #b00020;
-        font-size: 13px;
-      }
-      #status-text {
-        margin-top: 16px;
-        white-space: pre-wrap;
-      }
-      #speaker-override {
-        margin-top: 24px;
-        padding-top: 16px;
-        border-top: 1px solid #ccc;
-      }
-      #speaker-override h3 {
-        font-size: 14px;
-        margin-bottom: 4px;
-      }
-      #speaker-override .row {
-        display: flex;
-        gap: 8px;
-        margin-top: 8px;
-      }
-      #speaker-override input {
-        flex: 1;
-        margin-top: 0;
-      }
-      .hidden {
-        display: none;
-      }
-    </style>
+    <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
     <div id="setup-screen">
@@ -86,8 +30,16 @@
     </div>
 
     <div id="main-screen" class="hidden">
-      <button id="start-btn">Start listening</button>
-      <button id="stop-btn" class="hidden">Stop Ghost</button>
+      <div id="listening-indicator" class="hidden">
+        <span class="pulse-dot"></span>
+        <span id="listening-text">Ghost is listening</span>
+        <div id="meeting-meta"></div>
+      </div>
+
+      <div class="controls-row">
+        <button id="start-btn">Start listening</button>
+        <button id="stop-btn" class="hidden">Stop Ghost</button>
+      </div>
       <div id="status-text">Ghost is idle.</div>
 
       <div id="speaker-override">
@@ -98,6 +50,20 @@
           <button id="override-apply-btn">Apply</button>
         </div>
       </div>
+
+      <div id="active-decision" class="hidden"></div>
+
+      <div id="backend-unreachable" class="hidden">
+        <p>Can't reach Ghost's backend.</p>
+        <button id="retry-btn">Retry</button>
+      </div>
+
+      <div id="search-box">
+        <input id="search-input" type="text" placeholder="Search decisions…" />
+      </div>
+
+      <div id="decision-list"></div>
+      <div id="decision-list-empty" class="hidden">No decisions yet.</div>
     </div>
 
     <script src="sidepanel.js" type="module"></script>

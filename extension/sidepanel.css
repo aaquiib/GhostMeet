@@ -1,0 +1,331 @@
+/* Side panel design system: near-black background, cyan for
+   pending/listening state, green for approved. Every other status
+   badge gets its own muted accent so it's distinguishable at a glance
+   without competing with those two primary colors. */
+
+:root {
+  --bg: #0b0d10;
+  --surface: #14171c;
+  --surface-raised: #1b1f26;
+  --border: #262b33;
+  --text: #e6e9ef;
+  --text-dim: #9aa3b2;
+  --cyan: #4fd6e8;
+  --green: #4fe89a;
+  --amber: #e8b84f;
+  --red: #e85f5f;
+  --violet: #a78be8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  padding: 16px;
+  margin: 0;
+  font-size: 14px;
+}
+
+h2,
+h3 {
+  margin: 0 0 8px 0;
+  font-weight: 600;
+}
+
+label {
+  display: block;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+input[type='text'] {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  padding: 8px;
+  font-size: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+input[type='text']:focus {
+  outline: none;
+  border-color: var(--cyan);
+}
+
+button {
+  font-size: 13px;
+  padding: 8px 16px;
+  cursor: pointer;
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+button:hover {
+  border-color: var(--cyan);
+}
+
+#setup-save-btn {
+  margin-top: 16px;
+}
+
+#setup-error {
+  margin-top: 8px;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.controls-row {
+  display: flex;
+  gap: 8px;
+}
+
+#status-text {
+  margin-top: 12px;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+}
+
+/* --- Listening indicator ------------------------------------------- */
+
+#listening-indicator {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 0 0 rgba(79, 214, 232, 0.6);
+  animation: pulse 1.6s infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(79, 214, 232, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(79, 214, 232, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(79, 214, 232, 0);
+  }
+}
+
+#listening-text {
+  color: var(--cyan);
+  font-weight: 600;
+}
+
+#meeting-meta {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* --- Speaker override ------------------------------------------------ */
+
+#speaker-override {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+#speaker-override h3 {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+#speaker-override .row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+#speaker-override input {
+  flex: 1;
+  margin-top: 0;
+}
+
+/* --- Backend unreachable ------------------------------------------- */
+
+#backend-unreachable {
+  margin-top: 16px;
+  padding: 12px;
+  background: rgba(232, 95, 95, 0.08);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+}
+
+#backend-unreachable p {
+  margin: 0 0 8px 0;
+  color: var(--red);
+}
+
+/* --- Search (P2) ------------------------------------------------- */
+
+#search-box {
+  margin-top: 20px;
+}
+
+/* --- Decision list --------------------------------------------------- */
+
+#decision-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#decision-list-empty {
+  margin-top: 12px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.decision-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.decision-card.status-pending {
+  border-left-color: var(--cyan);
+}
+
+.decision-card.status-approved {
+  border-left-color: var(--green);
+}
+
+.decision-card.status-rejected {
+  border-left-color: var(--text-dim);
+}
+
+.decision-card.status-denied_by_policy {
+  border-left-color: var(--red);
+}
+
+.decision-card.status-answered_live {
+  border-left-color: var(--violet);
+}
+
+.decision-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.decision-card-speaker {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.decision-card-text {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.status-badge.status-pending {
+  background: rgba(79, 214, 232, 0.15);
+  color: var(--cyan);
+}
+
+.status-badge.status-approved {
+  background: rgba(79, 232, 154, 0.15);
+  color: var(--green);
+}
+
+.status-badge.status-rejected {
+  background: rgba(154, 163, 178, 0.15);
+  color: var(--text-dim);
+}
+
+.status-badge.status-denied_by_policy {
+  background: rgba(232, 95, 95, 0.15);
+  color: var(--red);
+}
+
+.status-badge.status-answered_live {
+  background: rgba(167, 139, 232, 0.15);
+  color: var(--violet);
+}
+
+/* --- Triggered/answered expanded view -------------------------------- */
+
+#active-decision {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--green);
+  border-radius: 8px;
+}
+
+#active-decision .active-decision-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--green);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+#active-decision .active-decision-question {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+#active-decision .active-decision-answer {
+  font-size: 13px;
+  line-height: 1.4;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
+
+#active-decision .active-decision-confirmation {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.hidden {
+  display: none;
+}

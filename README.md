@@ -245,6 +245,74 @@ pytest tests/test_search_endpoint.py -v     # real fallback (genuinely unreachab
 > Docker available, `docker compose up -d` then `pytest tests/test_search_endpoint.py -v` will
 > also exercise the real integration path.
 
+## Side panel UI (Phase 6)
+
+The side panel now reflects live and historical decision state without a manual refresh. After
+Start/Stop and the setup screen (Phase 1/4), it renders:
+
+- The **listening indicator** — a pulsing cyan dot + "Ghost is listening" whenever capture is
+  connected/reconnecting, with the session id and a "since HH:MM:SS" line beneath.
+- A **decision list** — one card per decision (speaker, timestamp, decision text, a colored status
+  badge: cyan `pending`, green `approved`, gray `rejected`, red `denied_by_policy`, violet
+  `answered_live`). All decision-derived text is inserted via `textContent`, never `innerHTML`.
+- A **triggered/answered view** — when a decision moves to `approved`/`answered_live`, it's pinned
+  above the list with the exact question, the drafted answer, and an "Answer sent"/"Take over
+  live" line, mirroring the Slack DM.
+- A **backend-unreachable message + retry button** if the initial `GET /decisions` hydration call
+  fails, instead of silently showing an empty list.
+- A **search box** (P2) — 300ms-debounced `GET /search?q=&meeting_id=`; clearing the query restores
+  the full list from in-memory state without refetching.
+
+**How live pushes reach the panel:** `backend/session_connections.py` is a registry mapping
+`meeting_session_id` -> the live WebSocket on `/ws/transcribe`/`/ws/demo`, so code that doesn't
+hold that WebSocket directly (`notification_pipeline.py`, `slack_webhook.py`) can still push to
+it. After Cedar + drafting complete, `notification_pipeline.py` pushes
+`{"type": "decision_batch", "meeting_id": ..., "decisions": [...]}` — every decision in the batch,
+allowed or denied, each carrying a `drafted_answer` key (allowed only; not part of `DecisionRecord`
+itself — Phase 3/4 deliberately keep drafts un-persisted, so this is an extra key on the pushed
+JSON only, reusing the same draft already computed for Slack). When a Slack button click updates a
+decision's status, `slack_webhook.py` pushes
+`{"type": "decision_status_update", "decision_id": ..., "status": ..., "approved_by": ...}` the
+same way. `offscreen.js` relays both (as `DECISION_BATCH`/`DECISION_STATUS_UPDATE`
+`chrome.runtime` messages — see `extension/messages.js`) to the side panel, along with the
+backend-confirmed session id (`SESSION_ID_ASSIGNED`) the very first time `/ws/transcribe` responds
+with `{"meeting_session_id": ...}` — that id (stored under the new `chrome.storage.session` key
+`ghostPanelSessionId`, distinct from `background.js`'s own client-generated `ghostSession` id,
+which the backend never actually uses) is what `GET /decisions`/`GET /search` calls are scoped by.
+Demo mode (`/ws/demo`) never sends that announcement, so the panel picks up `demo-meeting` from the
+first `decision_batch` push instead.
+
+`GET /decisions?meeting_id=` (new this phase) hydrates the panel's list on open/reopen; it's a thin
+wrapper over the same `decision_store.get_recent` Phase 5 already had, added because the panel
+needs a way to backfill state that predates it being open — live pushes on top of that, not instead
+of it. Historical decisions from it never carry `drafted_answer` (never persisted); only ones
+pushed live while the panel is open do.
+
+`extension/manifest.json` adds `http://localhost:8000/*` to `host_permissions` so the panel's
+`fetch()` calls to `GET /decisions`/`GET /search` aren't blocked by CORS — Chrome extension pages
+with a matching host permission bypass CORS entirely, so `main.py` didn't need `CORSMiddleware`.
+
+Run the Phase 6 backend tests (the new push wiring; no browser needed):
+
+```bash
+cd backend && source .venv/bin/activate
+pytest tests/test_session_connections.py tests/test_notification_pipeline.py tests/test_slack_webhook.py -v
+```
+
+Manual panel tests (no automated harness on the extension side):
+
+1. Point `backendUrl` at `/ws/demo` (see the Phase 2 section above), open the side panel, click
+   Start — a decision card should appear within ~2s of the scripted transcript triggering one,
+   with the right speaker/text/`pending` badge.
+2. Approve a decision from a real (or test) Slack DM — the panel should switch to the
+   triggered/answered view without a manual refresh or panel reopen.
+3. Stop the backend, then open the panel — the "Can't reach Ghost's backend" message and Retry
+   button should appear instead of a blank list; restart the backend and click Retry.
+4. Type a query matching one decision's text into the search box — only that decision should show;
+   clear the query — the full list returns without an extra network call.
+5. In demo mode, edit `backend/fixtures/demo_transcript.json` so a decision's text contains
+   `<b>test</b>` — it should render as the literal string in the card, not as bold markup.
+
 ## Slack app
 
 `slack-app/manifest.yaml` is the starting app manifest (scopes, interactivity config). Slack app

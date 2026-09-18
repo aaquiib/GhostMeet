@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import database
 import opensearch_client
+import session_connections
 from asr_base import MeetingLoggerAdapter
 from config import settings  # noqa: F401  (import triggers validation)
 from decision_detector import decision_pipeline, handle_control_message
@@ -60,6 +61,18 @@ app.include_router(slack_webhook_router)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/decisions")
+async def list_decisions(meeting_id: str) -> dict:
+    # Hydrates the side panel's decision list on open/reopen — live
+    # updates after that arrive via the decision_batch/
+    # decision_status_update WebSocket pushes (notification_pipeline.py,
+    # slack_webhook.py), not by polling this. Historical decisions
+    # here never carry drafted_answer (never persisted — see Phase 4);
+    # only decisions pushed live while this panel is open do.
+    decisions = await decision_store.get_recent(meeting_id, limit=200)
+    return {"decisions": [d.model_dump(mode="json") for d in decisions]}
 
 
 @app.get("/search")
@@ -172,10 +185,16 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
         init["slack_target"],
     )
 
+    # Registered so notification_pipeline.py/slack_webhook.py can push
+    # decision_batch/decision_status_update down this same connection —
+    # see session_connections.py.
+    session_connections.register(meeting_session_id, websocket)
+
     try:
         provider = await get_asr_provider(meeting_session_id, log)
     except Exception:
         log.exception("failed to start any ASR provider")
+        session_connections.unregister(meeting_session_id, websocket)
         await websocket.close(code=1011)
         return
 
@@ -246,6 +265,7 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
         # Guaranteed even on exception or abrupt disconnect, so the
         # AWS/Deepgram connection never leaks.
         await provider.stop()
+        session_connections.unregister(meeting_session_id, websocket)
         log.info("ASR provider stopped")
 
 
@@ -266,4 +286,8 @@ async def ws_demo(websocket: WebSocket):
         init["slack_target"],
     )
 
-    await run_demo_session(websocket, log)
+    session_connections.register(DEMO_MEETING_ID, websocket)
+    try:
+        await run_demo_session(websocket, log)
+    finally:
+        session_connections.unregister(DEMO_MEETING_ID, websocket)
