@@ -230,6 +230,64 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   `chat:write`/`im:write` — `slack_notifier.py` resolves an email `slack_target` via
   `users.lookupByEmail` before DMing.
 
+**Phase 5 (SQLite persistence + OpenSearch search):**
+
+- **`decision_store.DecisionStore` interface is unchanged** — `get_recent`/`create`/`update_status`
+  keep their exact Phase 4 signatures. `SQLiteDecisionStore` (backed by `database.py`'s async
+  SQLAlchemy setup) replaced `JSONLDecisionStore`; nothing upstream (`decision_detector.py`,
+  `notification_pipeline.py`, `answer_drafter.py`, `slack_webhook.py`) needed to change.
+- **Schema creation happens in `main.py`'s `lifespan` handler**, not at module import —
+  `async with engine.begin()` needs a running event loop. No Alembic/migrations.
+- **WAL journal mode is set via a SQLAlchemy `"connect"` event on `engine.sync_engine`**
+  (`database.py`), which fires per DBAPI connection — this is what makes concurrent
+  `create()`/`update_status()` calls (decision creation vs. the Slack webhook's status updates)
+  safe without "database is locked" errors. Confirmed empirically: `PRAGMA journal_mode` reads
+  back `wal` after connecting.
+- **SQLite has no native tz-aware datetime storage** — a `datetime.now(timezone.utc)` value comes
+  back from SQLAlchemy with `tzinfo=None`. `decision_store._row_to_record` reattaches
+  `timezone.utc` on every read, since every timestamp written here was already UTC and
+  `DecisionRecord`'s contract elsewhere assumes tz-aware. Don't remove this — a naive datetime
+  slipping into code that compares it against a tz-aware one raises `TypeError`.
+- **Tests use an isolated DB file**, not the real dev `ghost.db`: `database.DATABASE_URL` reads
+  `GHOST_DATABASE_URL` if set, and `tests/conftest.py` sets it to `test_ghost.db` before any test
+  module imports `database.py` (conftest.py is collected first). The same fixture also creates the
+  schema directly — `TestClient(app)` used without an explicit `with` block never fires the FastAPI
+  lifespan, so nothing else would create it for tests. Confirmed a fresh async engine handles
+  being used across pytest-asyncio's function-scoped event loops without cross-loop connection
+  errors — didn't need `NullPool`.
+- **`opensearch_client.py` is fully optional at every layer:** `_client` is `None` whenever
+  `OPENSEARCH_HOST` is unset, and every function treats that as "not part of this deployment," not
+  an error. `ensure_index()`/`index_decision()` never raise; `search_decisions()` is the one
+  function allowed to raise (unconfigured or unreachable), specifically so `main.py`'s `/search`
+  route can catch it and fall back to SQLite — the raising is deliberate, not a bug.
+- **`opensearch_client.index_decision(decision, approved_by=None)` takes `approved_by` as a
+  separate parameter**, not part of `DecisionRecord` — the record intentionally has no field for it
+  (Phase 4). Without this, `approved_by` could never become searchable despite
+  `search_decisions`'s `multi_match` querying it. `SQLiteDecisionStore.update_status` passes it
+  through after building a fresh record from the just-updated row.
+- **`GET /search?q=`**: tries OpenSearch first, falls back to a SQLite `LIKE '%q%'` scan across
+  `decision_text`/`approved_by`/`speaker` on any exception (unconfigured, unreachable, or a query
+  error) — never hard-fails just because OpenSearch is down. Uses `Depends(database.get_session)`
+  for its direct DB access, per the Depends-for-routes convention; `SQLiteDecisionStore` itself
+  isn't a route, so it opens its own sessions via `database.async_session_maker()` directly.
+- **`aiohttp` pinned explicitly** in `requirements.txt` — `opensearch-py`'s declared dependencies
+  are only `certifi`/`Events`/`python-dateutil`/`requests`/`urllib3`; `AsyncOpenSearch`'s transport
+  needs `aiohttp` but opensearch-py doesn't declare it, so it was present only transitively via
+  `deepgram-sdk`'s own pin. Pinning it directly means it can't silently disappear.
+- **`docker-compose.yml`** (repo root) is the only place Docker is used in this project, per
+  CLAUDE.md scope — a single-node OpenSearch with `plugins.security.disabled=true` for local-dev
+  simplicity (no TLS/auth setup needed; matches `OPENSEARCH_HOST=http://localhost:9200` with no
+  user/password). **Not verified against a real running OpenSearch in this sandbox** — Docker's
+  daemon needs privileges this environment doesn't grant, and image pulls from Docker Hub's CDN
+  are blocked by this session's egress policy (403, not a transient failure — did not retry or
+  route around it, per the agent proxy's own instructions). `opensearch_client.py`'s logic is
+  covered by tests against a fake client instead (`tests/test_opensearch_client.py`); the
+  fallback path is proven for real by pointing a genuine `AsyncOpenSearch` at an unreachable port
+  (`tests/test_search_endpoint.py`) rather than mocked, since that needs no Docker at all. That
+  file's `test_search_uses_opensearch_when_available` is a real, non-mocked integration check
+  against `docker-compose`'s OpenSearch — it skips itself when unreachable rather than failing the
+  suite, so it'll actually run and verify the real thing for anyone with Docker available.
+
 ## Conventions
 
 - One commit per completed phase, not mid-phase.

@@ -159,9 +159,9 @@ sessions.
 With `ASR_PROVIDER` and `LLM_API_KEY` both pointing at real, working credentials, running
 `scripts/feed_wav_file.py` against a real two-person recording exercises the full path — audio →
 transcript → decision detection — and any detected batch gets logged to the server console and
-appended to `backend/decisions_log.jsonl` (gitignored). A wrong/missing `LLM_API_KEY` fails
-gracefully: Tier 2 logs the failure and the window is treated as "not a decision" rather than
-crashing the session.
+persisted to SQLite (`backend/ghost.db`, gitignored — see Phase 5 below). A wrong/missing
+`LLM_API_KEY` fails gracefully: Tier 2 logs the failure and the window is treated as "not a
+decision" rather than crashing the session.
 
 ## Session identity + Cedar/Slack notification (Phase 4)
 
@@ -204,6 +204,46 @@ To actually receive a Slack DM end-to-end, you'll need:
 a real deny — edit it to add more rules; `cedar_policy.check_decision_policy` fails closed on any
 parse/evaluation error, so a broken policy file blocks notifications rather than allowing them
 through.
+
+## Persistence + search (Phase 5)
+
+Decisions persist in SQLite (`backend/ghost.db`, gitignored — schema created automatically on
+startup, WAL journal mode so concurrent writes from decision creation and the Slack webhook don't
+lock each other out). `backend/decision_store.py`'s `DecisionStore` interface is unchanged from
+Phase 4 — `SQLiteDecisionStore` just replaced the interim `JSONLDecisionStore`.
+
+```bash
+cd backend && source .venv/bin/activate
+pytest tests/test_database.py -v          # concurrency + lifecycle, no credentials needed
+```
+
+OpenSearch is optional and additive — SQLite stays the source of truth either way. For local dev:
+
+```bash
+docker compose up -d       # repo root — the only place this project uses Docker
+```
+
+Then set `OPENSEARCH_HOST=http://localhost:9200` in `backend/.env` (leave `OPENSEARCH_USER`/
+`OPENSEARCH_PASSWORD` blank — the compose file disables the security plugin for local-dev
+simplicity). With it unset or unreachable, `GET /search?q=` transparently falls back to a SQLite
+`LIKE` query — nothing hard-fails.
+
+```bash
+curl "http://localhost:8000/search?q=ship%20date"
+```
+
+```bash
+pytest tests/test_opensearch_client.py -v   # mapping/document/query shape, mocked client
+pytest tests/test_search_endpoint.py -v     # real fallback (genuinely unreachable host, no
+                                             # Docker needed) + a real OpenSearch check that
+                                             # skips itself if docker-compose isn't up
+```
+
+> This repo's own sandbox can't run Docker (nested containerization isn't available, and image
+> pulls are blocked by egress policy), so `opensearch_client.py` is verified here against a fake
+> client plus a real unreachable-host fallback check — not against a live OpenSearch. If you have
+> Docker available, `docker compose up -d` then `pytest tests/test_search_endpoint.py -v` will
+> also exercise the real integration path.
 
 ## Slack app
 

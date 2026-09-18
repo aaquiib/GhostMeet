@@ -10,9 +10,14 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+import database
+import opensearch_client
 from asr_base import MeetingLoggerAdapter
 from config import settings  # noqa: F401  (import triggers validation)
 from decision_detector import decision_pipeline, handle_control_message
@@ -34,13 +39,66 @@ logger = logging.getLogger("ghost.main")
 decision_pipeline.on_decision_batch = make_notification_pipeline(decision_store)
 decision_pipeline.set_decision_store(decision_store)
 
-app = FastAPI(title="AI Meeting Ghost")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # `async with engine.begin()` needs a running event loop, so schema
+    # creation happens here rather than at plain module-import time.
+    # No Alembic/migrations — hackathon schema, create once and move on.
+    await database.create_all()
+    # No-ops (logs and returns) if OPENSEARCH_HOST isn't set, or if
+    # OpenSearch isn't reachable — never blocks app startup on it.
+    await opensearch_client.ensure_index()
+    yield
+    await opensearch_client.close()
+
+
+app = FastAPI(title="AI Meeting Ghost", lifespan=lifespan)
 app.include_router(slack_webhook_router)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/search")
+async def search(q: str, session: AsyncSession = Depends(database.get_session)) -> dict:
+    try:
+        results = await opensearch_client.search_decisions(q)
+        return {"source": "opensearch", "results": results}
+    except Exception:
+        logger.warning(
+            "OpenSearch search failed or unavailable; falling back to SQLite", exc_info=True
+        )
+
+    pattern = f"%{q}%"
+    result = await session.execute(
+        select(database.Decision).where(
+            or_(
+                database.Decision.decision_text.like(pattern),
+                database.Decision.approved_by.like(pattern),
+                database.Decision.speaker.like(pattern),
+            )
+        )
+    )
+    rows = result.scalars().all()
+    results = [
+        {
+            "id": row.id,
+            "meeting_id": row.meeting_id,
+            "decision_text": row.decision_text,
+            "context": row.context,
+            "speaker": row.speaker,
+            "requires_action_from": row.requires_action_from,
+            "urgency": row.urgency,
+            "status": row.status,
+            "approved_by": row.approved_by,
+            "confidence": row.confidence,
+        }
+        for row in rows
+    ]
+    return {"source": "sqlite_fallback", "results": results}
 
 
 async def _reject_missing_session_init(websocket: WebSocket) -> None:

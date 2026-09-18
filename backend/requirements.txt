@@ -24,3 +24,9 @@ httpx==0.27.2
 # Starlette's Request.form() needs this to parse it and isn't pulled
 # in by fastapi's base install either.
 python-multipart==0.0.20
+# opensearch_client.py uses AsyncOpenSearch, whose aiohttp-based
+# transport opensearch-py doesn't declare as a hard dependency (only
+# `certifi`, `Events`, `python-dateutil`, `requests`, `urllib3` are).
+# Was present only transitively via deepgram-sdk — pinned explicitly
+# so it doesn't silently disappear if that pin ever changes.
+aiohttp==3.14.3

@@ -6,6 +6,12 @@ LLM client, callback, and decision_store monkeypatched for the
 duration of each test, so this exercises the real production wiring
 path rather than a parallel one. No real Anthropic/Slack network calls
 happen anywhere in this file.
+
+Uses the real shared SQLiteDecisionStore (backed by tests/conftest.py's
+isolated test_ghost.db) rather than a per-test store — SQLiteDecisionStore
+has no per-instance path to isolate the way Phase 4's JSONLDecisionStore
+did, since every instance talks to the same database.py engine. Each
+test's decisions stay disambiguated by meeting_id, same as production.
 """
 
 import asyncio
@@ -20,7 +26,7 @@ import cedar_policy
 import slack_notifier
 from config import settings
 from decision_detector import decision_pipeline
-from decision_store import JSONLDecisionStore
+from decision_store import decision_store as shared_decision_store
 from notification_pipeline import make_notification_pipeline
 from tests.fixtures.decision_fixtures import (
     MEETING_ID,
@@ -74,8 +80,8 @@ def fast_draft_llm(monkeypatch):
 
 
 @pytest.fixture
-def fake_decision_store(tmp_path):
-    return JSONLDecisionStore(path=tmp_path / "test_decisions.jsonl")
+def fake_decision_store():
+    return shared_decision_store
 
 
 @pytest.fixture
