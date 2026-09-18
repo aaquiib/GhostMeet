@@ -1,13 +1,34 @@
 <!DOCTYPE html>
-<!-- Side panel UI: the "Ghost is listening" consent indicator, the
-     manual "Stop Ghost" control, and (later) triggered/answered state
-     and decision search. -->
+<!-- Side panel UI. Minimal for this phase: a Start/Stop control and a
+     plain-text status area (the seed of the "Ghost is listening"
+     consent indicator — Phase 6 styles this properly). -->
 <html>
   <head>
     <meta charset="utf-8" />
     <title>AI Meeting Ghost</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        padding: 16px;
+      }
+      button {
+        font-size: 14px;
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+      #status-text {
+        margin-top: 16px;
+        white-space: pre-wrap;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
   </head>
   <body>
-    <script src="sidepanel.js"></script>
+    <button id="start-btn">Start listening</button>
+    <button id="stop-btn" class="hidden">Stop Ghost</button>
+    <div id="status-text">Ghost is idle.</div>
+    <script src="sidepanel.js" type="module"></script>
   </body>
 </html>

@@ -80,6 +80,31 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 6. Side panel UI (listening state, triggered/answered state, search — search is P2, cut first if short on time)
 7. Demo rehearsal — run this in a clean context, full end-to-end, twice in a row
 
+## Settled decisions from completed phases
+
+**Phase 1 (extension audio capture):**
+
+- **Message protocol:** every `chrome.runtime.sendMessage` payload is `{ type, target, ...data }`.
+  `type` is always one of the named constants in `extension/messages.js`
+  (`START_CAPTURE`, `STOP_CAPTURE`, `CAPTURE_STARTED`, `CAPTURE_STOPPED`, `CAPTURE_ERROR`,
+  `CONNECTION_STATUS`), never a raw string. `target` is `'background'`, `'offscreen'`, or
+  `'sidepanel'` and exists because Chrome's messaging is a broadcast bus — every context with a
+  listener receives every message, so each listener filters on `target` to avoid mis-handling or
+  self-looping on messages it sent itself.
+- **Capture state:** background.js keeps state in `chrome.storage.session` under the key
+  `ghostSession`, shape `{ status: 'idle'|'capturing'|'error', meetingSessionId: string|null,
+  tabId: number|null }`. Session storage (not in-memory globals) so a service-worker restart
+  mid-call doesn't lose track of an in-progress session.
+- **Backend URL:** offscreen.js reads it from `chrome.storage.local` key `backendUrl`, default
+  `ws://localhost:8000/ws/transcribe`. Unset/empty falls back to the default.
+- **PCM wire format:** raw binary WebSocket frames (not JSON-wrapped), Int16 PCM, mono, 16kHz,
+  4096 samples (8192 bytes) per frame. Phase 2's backend WS handler needs to expect exactly this,
+  not a JSON envelope.
+- **Reconnection:** offscreen.js retries a dropped backend connection up to 3 times with a 3s
+  delay between attempts; the 3rd failure broadcasts `CAPTURE_ERROR` ("Connection lost") and
+  tears down the whole capture pipeline (mic, audio graph, socket) rather than leaving it running
+  with nowhere to send audio.
+
 ## Conventions
 
 - One commit per completed phase, not mid-phase.

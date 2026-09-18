@@ -6,7 +6,8 @@
   "permissions": ["tabCapture", "offscreen", "sidePanel", "storage", "tabs"],
   "host_permissions": ["*://meet.google.com/*"],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "side_panel": {
     "default_path": "sidepanel.html"

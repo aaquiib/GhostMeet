@@ -46,6 +46,46 @@ pytest
 2. Enable "Developer mode" (top-right toggle).
 3. Click "Load unpacked" and select the `extension/` directory.
 4. Confirm "AI Meeting Ghost" appears with no errors, and that its icon shows up in the toolbar.
+5. Open a `meet.google.com` tab (a real or empty call works), then click the extension's toolbar
+   icon — the side panel should open. Nothing starts capturing yet at this point.
+6. Click "Start listening". Chrome should prompt for tab-audio capture permission the first
+   time; after that the status area should read "Ghost is listening." Confirm you do **not**
+   hear the meeting audio play a second time — that would mean the audio graph is wired to
+   `audioContext.destination` instead of the silent sink, which must never happen.
+7. Click "Stop Ghost" — the status should return to "Ghost is idle." and the Start button should
+   reappear. Closing the Meet tab (or navigating it away from meet.google.com) while capturing
+   should trigger the same automatic stop.
+8. Check `chrome://extensions` → service worker "Inspect views" and the offscreen document's
+   console for errors during the above.
+
+## Testing audio capture without the real backend (Phase 1)
+
+`scripts/test_ws_echo.py` is a throwaway WebSocket server that logs the byte length of every
+binary PCM frame it receives, so the capture pipeline can be verified before Phase 2's real
+backend exists.
+
+```bash
+source backend/.venv/bin/activate   # already has `websockets` installed
+python3 scripts/test_ws_echo.py     # listens on ws://localhost:8765
+```
+
+Point the extension at it — open the side panel, inspect it (right-click → Inspect), and in its
+devtools console run:
+
+```js
+chrome.storage.local.set({ backendUrl: "ws://localhost:8765" })
+```
+
+Click "Start listening" on a `meet.google.com` tab and watch the echo server's terminal log
+frame sizes (8192 bytes per frame — 4096 samples × 2 bytes for 16-bit PCM) and a running total
+every 10 frames.
+
+Switch back once Phase 2's real backend is up:
+
+```js
+chrome.storage.local.set({ backendUrl: "ws://localhost:8000/ws/transcribe" })
+// or: chrome.storage.local.remove("backendUrl") to fall back to that same default
+```
 
 ## Slack app
 
