@@ -31,7 +31,14 @@ Ghost does not dial into a meeting unattended. "Can't attend" means a muted brow
 
 ## Non-negotiable behaviors
 
-- **No echo/feedback:** processed audio must route to a silent sink, never `audioContext.destination`.
+- **No echo/feedback, but audio must stay audible locally:** the *encoding* branch (source ->
+  ScriptProcessorNode -> discard sink) must never itself connect to `audioContext.destination` —
+  that would double-play the audio. But `getUserMedia({chromeMediaSource: 'tab'})` captures the
+  tab exclusively and silences its normal output the moment capture starts, so a second,
+  independent fan-out straight from `source` to `audioContext.destination` (not routed through the
+  encoding branch) is required in `offscreen.js`'s `startCapture()` to keep the meeting audible to
+  the local user while Ghost is listening. One playback path, no duplication — that's what "no
+  echo" actually means here, not "never route to destination at all."
 - **Debounce before notifying:** hold the first detected decision for a 10–15s coalescing window; batch anything else that lands in it into one Slack DM, not one per detection.
 - **Drafted answer required:** before sending the Slack DM, query past decisions (OpenSearch, or Postgres early on) for relevant context and draft a suggested answer via a second LLM call. This is the core differentiator — don't ship a plain notifier.
 - **Cedar policy check gates every notification.** "Deny" means log the decision, send nothing.

@@ -1,12 +1,13 @@
 // Runs in the offscreen document. Owns the actual audio pipeline:
-// getUserMedia on the tab-capture stream, the Web Audio graph (mono
-// downmix -> ScriptProcessorNode -> silent sink, never
-// audioContext.destination — that would play the meeting audio out
-// loud a second time), PCM16 encoding of each buffer, and the
-// WebSocket relay to the backend, including bounded reconnection. Also
-// owns sending the session_init identity handshake as the first
-// message on every (re)connection, and relaying speaker_override
-// submissions as control messages on the same socket.
+// getUserMedia on the tab-capture stream, the Web Audio graph — the
+// source fans out to two independent branches: mono downmix ->
+// ScriptProcessorNode -> discard sink (encoding) and source ->
+// audioContext.destination (local playback, since tab capture silences
+// the tab's normal output otherwise) — PCM16 encoding of each buffer,
+// and the WebSocket relay to the backend, including bounded
+// reconnection. Also owns sending the session_init identity handshake
+// as the first message on every (re)connection, and relaying
+// speaker_override submissions as control messages on the same socket.
 
 import {
   START_CAPTURE,
@@ -168,9 +169,11 @@ async function startCapture(streamId, watchedUserNameVariants, slackTarget, back
   source.channelCountMode = 'explicit';
 
   const processor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
-  // Silent sink: processed audio is routed here, never to
-  // audioContext.destination, so the meeting audio never plays out
-  // loud a second time.
+  // Discard sink for the encoding branch: ScriptProcessorNode only
+  // fires onaudioprocess while connected (directly or indirectly) to
+  // something pulling the graph, so processor needs *a* destination —
+  // this one, not audioContext.destination, so the encoding branch
+  // itself never plays audible output.
   const sink = audioContext.createMediaStreamDestination();
 
   pipeline = {
@@ -196,6 +199,16 @@ async function startCapture(streamId, watchedUserNameVariants, slackTarget, back
 
   source.connect(processor);
   processor.connect(sink);
+  // getUserMedia({chromeMediaSource: 'tab'}) captures the tab exclusively:
+  // Chrome stops routing its audio to the OS output the moment capture
+  // starts, so without this the meeting goes silent for the local user
+  // (and anyone in the room listening through their speakers) the
+  // instant Ghost starts listening. This is a second, independent fan-out
+  // straight from source — not routed through processor/sink — so it
+  // has no effect on the PCM16 encoding branch above. It has no effect
+  // on what other Meet participants hear either: that's carried over
+  // Meet's own WebRTC upload, entirely separate from this local capture.
+  source.connect(audioContext.destination);
 
   broadcast({ type: CONNECTION_STATUS, status: 'connecting' });
   pipeline.ws = connectWebSocket(backendUrl);
