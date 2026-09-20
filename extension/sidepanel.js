@@ -97,7 +97,7 @@ function statusLabel(status) {
     case 'pending':
       return 'Pending';
     case 'approved':
-      return 'Approved';
+      return 'Read';
     case 'rejected':
       return 'Rejected';
     case 'denied_by_policy':

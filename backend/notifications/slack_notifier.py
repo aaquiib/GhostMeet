@@ -2,10 +2,15 @@
 Owns composing and sending the Slack DM for a coalesced decision
 batch: Block Kit layout (header, mention type, context, the verbatim
 mention as a blockquote, the drafted-answer text, a status line, and a
-single "✓ Done" button) for each decision in the batch. Talks to Slack
+single "✓ Read" button) for each decision in the batch. Talks to Slack
 via slack-sdk using SLACK_BOT_TOKEN — but the DM *target* always comes
 from the caller (the session's session_init identity), never from
 Settings or a hardcoded value here.
+
+The button is a lightweight "I've seen this" acknowledgment, not a
+claim that anything was approved or completed — deliberate, since
+every mention type reaches Slack now (see below), including FYI-only
+ones with no action to actually approve.
 
 The old three-button (Approve/Reject/Join & Answer Live) layout is
 gone entirely — see CLAUDE.md's mention-type migration note. All five
@@ -33,13 +38,15 @@ _client = AsyncWebClient(token=settings.slack_bot_token)
 # dict, not inline conditionals scattered through the block-builder, so
 # adding/adjusting a status display is a one-line change in one place.
 # rejected/denied_by_policy/answered_live are kept for completeness —
-# the new "done"-only button flow (Part D) never itself produces
-# "rejected" anymore, but a record could still carry it from elsewhere
-# (e.g. a status set before this migration), and denied_by_policy/
-# answered_live remain real states other parts of the system set.
+# the "read"-only button flow never itself produces "rejected" anymore,
+# but a record could still carry it from elsewhere (e.g. a status set
+# before this migration), and denied_by_policy/answered_live remain
+# real states other parts of the system set. "approved" displays as
+# "Read" — see slack_webhook.py for why that status value is reused
+# rather than adding a new one.
 STATUS_DISPLAY = {
     "pending": "🟡 Pending",
-    "approved": "✅ Done",
+    "approved": "✅ Read",
     "rejected": "❌ Rejected",
     "denied_by_policy": "🚫 Denied by policy",
     "answered_live": "🎙️ Answered live",
@@ -106,10 +113,10 @@ def _build_blocks(decisions_with_drafts: list[tuple[DecisionRecord, str]]) -> li
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "✓ Done"},
+                        "text": {"type": "plain_text", "text": "✓ Read"},
                         "style": "primary",
-                        "action_id": "decision_done",
-                        "value": f"{decision.id}:done",
+                        "action_id": "decision_read",
+                        "value": f"{decision.id}:read",
                     }
                 ],
             }

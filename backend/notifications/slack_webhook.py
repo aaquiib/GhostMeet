@@ -1,12 +1,12 @@
 """
 Owns the inbound side of Slack: the FastAPI route that receives
-interactivity payloads (button clicks — just "✓ Done" now, see
+interactivity payloads (button clicks — just "✓ Read" now, see
 CLAUDE.md's mention-type migration note) from Slack's request URL,
 verifies the request signature against SLACK_SIGNING_SECRET using the
 raw body, and responds immediately — the actual decision_store update
 runs afterward via BackgroundTasks so Slack never times out waiting and
 retries the same click. That same background task also pushes the
-update to the side panel's WebSocket connection, so clicking Done from
+update to the side panel's WebSocket connection, so clicking Read from
 Slack is reflected live there too, not just in Slack.
 """
 
@@ -58,7 +58,7 @@ async def slack_interaction(request: Request, background_tasks: BackgroundTasks)
     value = action.get("value", "")
     user_id = payload.get("user", {}).get("id", "unknown")
 
-    if action_id != "decision_done" or ":" not in value:
+    if action_id != "decision_read" or ":" not in value:
         logger.warning("unrecognized Slack interaction: action_id=%r value=%r", action_id, value)
         return Response(status_code=200)
 
@@ -69,14 +69,19 @@ async def slack_interaction(request: Request, background_tasks: BackgroundTasks)
         logger.warning("malformed decision id in button value: %r", value)
         return Response(status_code=200)
 
-    if status_word != "done":
+    if status_word != "read":
         logger.warning("unrecognized status word in button value: %r", value)
         return Response(status_code=200)
 
-    # "done" reuses the existing "approved" status value rather than
-    # adding a new one — the Slack card's own text/emoji already
-    # communicates "Done" to the human, so there's no real benefit to
-    # an ALTER TYPE migration on the status enum for this.
+    # "read" is a lightweight acknowledgment — "I've seen this" — not a
+    # claim that anything was approved or acted on. It reuses the
+    # existing "approved" status value rather than adding a new one to
+    # the native Postgres enum (an ALTER TYPE / drop-and-recreate on the
+    # live table for a value that's purely a display-label choice isn't
+    # worth it): the Slack card's and side panel's own text already
+    # communicate "Read" to the human, so no schema change is needed to
+    # change what this click means. approved_by (below) still records
+    # who clicked, for the same audit purpose it always had.
     status = "approved"
 
     # Respond to Slack first; update afterward so the click is never
