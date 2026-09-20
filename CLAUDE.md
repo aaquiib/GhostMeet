@@ -14,6 +14,16 @@ Built for a 48-hour hackathon. Optimize for a working, rehearsed demo over compl
 - **Audio processing:** `ScriptProcessorNode`, not `AudioWorklet` — simpler for the timeline, fine for a demo.
 - **Speaker mapping:** Infer names from self-introductions ("I'm ___" / "This is ___"), fall back to generic labels (`spk_0`, `spk_1`) otherwise.
 - **Diarization:** Use Transcribe's speaker-label diarization for a single mixed stream. Do **not** use channel identification — that requires true stereo with one speaker per channel, which tab audio isn't.
+- **Diarization is per-item, not per-result:** Transcribe streaming labels each item (word)
+  independently rather than labeling the whole result as one speaker turn. `_aws_result_to_event`
+  (`backend/transcription/aws_transcribe.py`) takes a **majority vote** of item speakers for the
+  result's speaker, not the first labeled item — the first word is the most common place for a
+  stray diarization mislabel (the model hasn't locked onto the speaker cluster yet), and using it
+  alone caused one continuous utterance to get split across two different displayed speakers, plus
+  phantom extra speaker labels in a two-person conversation. Majority vote doesn't eliminate AWS's
+  own diarization limitations in streaming mode (there's no "expected speaker count" knob on the
+  streaming API, unlike the batch API's `MaxSpeakerLabels`), so occasional genuine over-segmentation
+  can still happen — the existing speaker-override UI is the user-facing mitigation for that case.
 
 ## Key assumption to hold consistently
 
@@ -131,6 +141,15 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   `ghostSession`, shape `{ status: 'idle'|'capturing'|'error', meetingSessionId: string|null,
   tabId: number|null }`. Session storage (not in-memory globals) so a service-worker restart
   mid-call doesn't lose track of an in-progress session.
+- **Reconciling stale capture state:** the stored flag above is only ever updated by the normal
+  start/stop/error message flow, so it can't be trusted blindly — if the offscreen document dies
+  outside that flow (most commonly a dev-time extension reload), the flag is left saying
+  `'capturing'` with nothing actually running, which made the side panel's "Ghost is listening"
+  indicator show up on a fresh panel open before Start was ever clicked. sidepanel.js's
+  `restoreState()` therefore never reads `chrome.storage.session` directly; it sends a
+  `GET_SESSION_STATE` message and background.js answers with the stored state reconciled against
+  `chrome.offscreen.hasDocument()`, resetting to idle first if the two disagree. This is the only
+  read path for capture state on panel open — do not reintroduce a direct storage read there.
 - **Backend URL:** stored in `chrome.storage.local` key `backendUrl`, default
   `ws://localhost:8000/ws/transcribe`. Unset/empty falls back to the default. Read by
   background.js (not offscreen.js — `chrome.storage` was found to be unavailable inside the
