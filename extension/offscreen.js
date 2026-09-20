@@ -19,6 +19,7 @@ import {
   SESSION_ID_ASSIGNED,
   DECISION_BATCH,
   DECISION_STATUS_UPDATE,
+  TRANSCRIPT_EVENT,
 } from './messages.js';
 
 const DEFAULT_BACKEND_URL = 'ws://localhost:8000/ws/transcribe';
@@ -105,9 +106,20 @@ function connectWebSocket(backendUrl) {
           approvedBy: payload.approved_by,
         });
         break;
+      case 'transcript':
+        broadcast({
+          type: TRANSCRIPT_EVENT,
+          id: payload.id,
+          meetingId: payload.meeting_id,
+          speaker: payload.speaker,
+          text: payload.text,
+          timestamp: payload.timestamp,
+          confidence: payload.confidence,
+        });
+        break;
       default:
-        // Transcript events and "error" messages aren't this phase's
-        // concern — left for whichever future phase relays them.
+        // "error" messages aren't this phase's concern — left for
+        // whichever future phase relays them.
         break;
     }
   };

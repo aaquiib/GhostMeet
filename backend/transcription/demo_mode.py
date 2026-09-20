@@ -18,6 +18,7 @@ from pathlib import Path
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+import transcript_store
 from transcription.asr_base import TranscriptEvent
 from decision_detector import decision_pipeline, handle_control_message
 
@@ -66,7 +67,13 @@ async def run_demo_session(websocket: WebSocket, log) -> None:
                 is_partial=False,
                 meeting_id=DEMO_MEETING_ID,
             )
-            await websocket.send_json(event.model_dump(mode="json"))
+            # Persisted before the send so the live frame can carry the
+            # same id hydration will later return — see main.py's
+            # transcript_loop for the full reasoning.
+            line_id = await transcript_store.create(event)
+            await websocket.send_json(
+                {**event.model_dump(mode="json"), "type": "transcript", "id": str(line_id) if line_id else None}
+            )
             log.info("sent demo event: %s: %r", event.speaker, event.text)
             await decision_pipeline.process_transcript_event(event)
             await asyncio.sleep(SEND_INTERVAL_SECONDS)

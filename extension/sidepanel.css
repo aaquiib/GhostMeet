@@ -167,6 +167,123 @@ button:hover {
   margin-top: 0;
 }
 
+/* --- Transcript feed (live-chat style) -------------------------------- */
+
+#transcript-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  position: relative;
+}
+
+#transcript-section h3 {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+#transcript-feed {
+  margin-top: 8px;
+  height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  scroll-behavior: smooth;
+}
+
+#transcript-feed-empty {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Newest message slides up into place from the bottom rather than
+   just popping in — this is what "messages slowly move up" actually
+   looks like in a bottom-anchored feed: the container's real scroll
+   already handles older lines being pushed up as the view tracks the
+   newest one, this animation is just the entrance for that newest
+   line itself. */
+@keyframes transcript-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.transcript-line {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border-left: 3px solid var(--border);
+  background: var(--surface-raised);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+/* Applied only to a line the first time it's rendered (see
+   sidepanel.js's animatedLineIds) — without this gate, every already-
+   visible line would replay this on every render, since the whole
+   feed is rebuilt each time. */
+.transcript-line-enter {
+  animation: transcript-line-in 220ms ease-out;
+}
+
+.transcript-line-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.transcript-line-speaker {
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.transcript-line-text {
+  color: var(--text);
+}
+
+/* The line whose content triggered a Slack notification — matched
+   client-side against each decision's mention_quote as decision
+   batches arrive (see sidepanel.js's markTriggeredTranscriptLines). */
+.transcript-line.triggered {
+  border-left-color: var(--red);
+  background: rgba(232, 95, 95, 0.1);
+}
+
+.transcript-line.triggered .transcript-line-speaker {
+  color: var(--red);
+}
+
+#transcript-jump-latest {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  font-size: 12px;
+  background: var(--cyan);
+  color: var(--bg);
+  border: none;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+#transcript-jump-latest:hover {
+  border-color: transparent;
+  opacity: 0.9;
+}
+
 /* --- Backend unreachable ------------------------------------------- */
 
 #backend-unreachable {

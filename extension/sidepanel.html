@@ -1,9 +1,10 @@
 <!DOCTYPE html>
 <!-- Side panel UI: one-time identity setup screen (gates Start until
      filled in), Start/Stop controls, the "Ghost is listening" consent
-     indicator, the live/historical decision list, the triggered/
-     answered expanded view, and search (P2). Styling lives entirely in
-     sidepanel.css — this file only carries structure. -->
+     indicator, the live-chat-style transcript feed, the live/
+     historical decision list, the triggered/answered expanded view,
+     and search (P2). Styling lives entirely in sidepanel.css — this
+     file only carries structure. -->
 <html>
   <head>
     <meta charset="utf-8" />
@@ -56,6 +57,13 @@
       <div id="backend-unreachable" class="hidden">
         <p>Can't reach Ghost's backend.</p>
         <button id="retry-btn">Retry</button>
+      </div>
+
+      <div id="transcript-section">
+        <h3>Transcript</h3>
+        <div id="transcript-feed"></div>
+        <div id="transcript-feed-empty" class="hidden">Nothing heard yet.</div>
+        <button id="transcript-jump-latest" class="hidden">↓ New messages</button>
       </div>
 
       <div id="search-box">
