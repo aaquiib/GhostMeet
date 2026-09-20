@@ -215,16 +215,38 @@ _DEDUP_LEDGER_SIZE = 10
 _DEDUP_OVERLAP_THRESHOLD = 0.6
 
 
-def _is_duplicate(candidate_text: str, recent_texts: Iterable[str]) -> bool:
-    candidate_words = set(re.findall(r"\w+", candidate_text.lower()))
-    if not candidate_words:
-        return False
-    for prior_text in recent_texts:
-        prior_words = set(re.findall(r"\w+", prior_text.lower()))
-        if not prior_words:
-            continue
-        overlap = len(candidate_words & prior_words) / len(candidate_words | prior_words)
-        if overlap >= _DEDUP_OVERLAP_THRESHOLD:
+def _word_overlap(a: str, b: str) -> float:
+    words_a = set(re.findall(r"\w+", a.lower()))
+    words_b = set(re.findall(r"\w+", b.lower()))
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _is_duplicate(
+    candidate: "tuple[str, str]", recent: "Iterable[tuple[str, str]]"
+) -> bool:
+    """candidate/recent entries are (decision_text, mention_quote) pairs.
+    Checking decision_text alone missed real duplicates in practice:
+    the same literal utterance can get classified twice (window
+    carry-forward, or the sticky-window extension above, both
+    deliberately re-expose recent text to Tier 2) and each LLM call
+    writes its own one-sentence decision_text summary independently —
+    phrased differently enough between calls that word-overlap can
+    fall under threshold even though it's the same real request.
+    mention_quote is copied verbatim from the transcript by
+    instruction (_SYSTEM_PROMPT), so it stays far more stable across
+    repeat classifications of the same sentence — confirmed against a
+    real duplicate pair from a live session where decision_text
+    overlap was 0.53 (missed) but mention_quote overlap was 0.92
+    (caught). Checked in addition to, not instead of, decision_text —
+    catches a duplicate if either field matches, which only ever
+    widens what's caught."""
+    candidate_decision_text, candidate_quote = candidate
+    for prior_decision_text, prior_quote in recent:
+        if _word_overlap(candidate_decision_text, prior_decision_text) >= _DEDUP_OVERLAP_THRESHOLD:
+            return True
+        if _word_overlap(candidate_quote, prior_quote) >= _DEDUP_OVERLAP_THRESHOLD:
             return True
     return False
 
@@ -302,6 +324,7 @@ class _SessionState:
     window_start: datetime | None = None
     speaker_mapper: SpeakerMapper = field(default_factory=SpeakerMapper)
     watch_names_pattern: re.Pattern | None = None
+    # Each entry is (decision_text, mention_quote) — see _is_duplicate.
     recent_decisions: deque = field(default_factory=lambda: deque(maxlen=_DEDUP_LEDGER_SIZE))
     pending_batch: list = field(default_factory=list)
     batch_timer_task: "asyncio.Task | None" = None
@@ -554,11 +577,15 @@ class DecisionPipeline:
             return
 
         async with state.lock:
-            if _is_duplicate(record.decision_text, state.recent_decisions):
-                logger.info("[meeting_id=%s] deduped decision: %r", meeting_id, record.decision_text)
+            candidate = (record.decision_text, record.mention_quote)
+            if _is_duplicate(candidate, state.recent_decisions):
+                logger.info(
+                    "[meeting_id=%s] deduped decision: %r (quote=%r)",
+                    meeting_id, record.decision_text, record.mention_quote,
+                )
                 return
 
-            state.recent_decisions.append(record.decision_text)
+            state.recent_decisions.append(candidate)
             state.pending_batch.append(record)
 
             # Fixed window, not resettable: only start the timer if one
