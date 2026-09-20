@@ -23,6 +23,19 @@ from config import settings
 logger = logging.getLogger("ghost.asr")
 
 
+def _normalize_speaker_label(raw: "str | None") -> str:
+    """Transcribe's *streaming* API labels speakers `"0"`, `"1"`, while
+    its batch API — and the demo fixture, the side panel's
+    speaker-override input, and this project's docs — all use
+    `"spk_0"`/`"spk_1"`. Normalizing at the provider edge is what makes
+    an override typed as `spk_0` actually match a live session's
+    events; without it, overrides silently do nothing in real meetings
+    while appearing to work in the demo."""
+    if not raw:
+        return "unknown"
+    return f"spk_{raw}" if raw.isdigit() else raw
+
+
 def _aws_result_to_event(result: AwsResult, meeting_id: str) -> TranscriptEvent:
     alternative = result.alternatives[0] if result.alternatives else None
     text = alternative.transcript if alternative else ""
@@ -30,7 +43,7 @@ def _aws_result_to_event(result: AwsResult, meeting_id: str) -> TranscriptEvent:
 
     # One result is one speaker turn under Transcribe's diarization, so
     # the first labeled item represents the whole result.
-    speaker = next((item.speaker for item in items if item.speaker), "unknown")
+    speaker = _normalize_speaker_label(next((item.speaker for item in items if item.speaker), None))
 
     confidences = [
         item.confidence
