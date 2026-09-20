@@ -10,6 +10,7 @@ types are translated into TranscriptEvent before anything leaves.
 """
 
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
@@ -41,9 +42,19 @@ def _aws_result_to_event(result: AwsResult, meeting_id: str) -> TranscriptEvent:
     text = alternative.transcript if alternative else ""
     items = alternative.items if alternative else []
 
-    # One result is one speaker turn under Transcribe's diarization, so
-    # the first labeled item represents the whole result.
-    speaker = _normalize_speaker_label(next((item.speaker for item in items if item.speaker), None))
+    # Transcribe's *streaming* diarization labels each item (word)
+    # independently, not the result as a whole — a single result can
+    # carry a stray mislabeled item (most often the very first word,
+    # where the diarization model hasn't yet locked onto the speaker
+    # cluster) while the rest of the words agree on the real speaker.
+    # Taking only the first labeled item's speaker propagated that
+    # jitter to the entire line, which is what produced both observed
+    # symptoms: one continuous utterance getting split across two
+    # different displayed speakers, and phantom extra speaker labels
+    # showing up in a two-person conversation. Majority vote across all
+    # labeled items is far more resistant to a single stray item.
+    speaker_votes = Counter(item.speaker for item in items if item.speaker)
+    speaker = _normalize_speaker_label(speaker_votes.most_common(1)[0][0] if speaker_votes else None)
 
     confidences = [
         item.confidence

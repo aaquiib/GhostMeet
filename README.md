@@ -1,123 +1,197 @@
 # AI Meeting Ghost
 
-A Chrome extension that listens to a Google Meet call you have open, detects when a decision or
-question needs your input, and notifies you on Slack with a drafted answer you can approve, edit,
-or override. Built for a 48-hour hackathon — see [CLAUDE.md](./CLAUDE.md) for full scope,
-locked decisions, and build order.
+**Your always-on second self for meetings you can't fully attend.**
 
-## Backend setup
+AI Meeting Ghost is a Chrome extension and backend system that listens to a Google Meet call, understands in real time when something is being asked of you, drafts a response grounded in the meeting's own context, and hands it to you on Slack — so a meeting you couldn't fully attend still gets acted on within minutes, not after the fact.
+
+Built end to end in a 48-hour hackathon.
+
+---
+
+## Table of Contents
+
+- [The Idea](#the-idea)
+- [How It Works](#how-it-works)
+- [Key Features](#key-features)
+- [Built With AWS](#built-with-aws)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
+- [Getting Started](#getting-started)
+- [Try It in 2 Minutes (No AWS/Slack Setup Needed)](#try-it-in-2-minutes-no-awsslack-setup-needed)
+- [Project Status](#project-status)
+- [Learn More](#learn-more)
+
+---
+
+## The Idea
+
+Meetings are where decisions get made and work gets assigned — but you can't be in every meeting, and being physically present doesn't guarantee you're mentally present either. Something gets asked of you, you miss it, and you find out an hour later when someone follows up wondering why you never responded.
+
+AI Meeting Ghost solves this by turning an open (but unattended) Google Meet tab into an active listener on your behalf. It transcribes the conversation in real time, watches for the moments that involve you — a direct question, an action assigned to you, or simply a mention worth knowing about — classifies what kind of moment it is, drafts a suggested response using the meeting's own recent history as context, and sends it to you as a Slack DM you can approve, edit, or reject with one tap. You get pulled back in only when it actually matters, already caught up.
+
+Ghost never joins or "attends" a meeting on its own — it makes an already-open, muted browser tab useful. A human is always in the loop.
+
+## How It Works
+
+Using Ghost is a single action: open the side panel on a Google Meet tab, fill in your name and Slack ID once, and click **Start listening**.
+
+1. **You start listening.** Ghost quietly captures the tab's audio in the background — the meeting keeps playing normally through your speakers, nothing about the call itself changes.
+2. **The transcript streams live.** As the conversation unfolds, a live, YouTube-chat-style transcript scrolls up the side panel — newest message at the bottom — so you can glance at what's being said without actively following along.
+3. **Ghost listens for you.** The moment someone asks you something, assigns you an action, or references you in a way worth knowing about, Ghost detects it and classifies what kind of moment it is.
+4. **A response gets drafted.** For anything actionable, Ghost drafts a suggested reply grounded in the meeting's recent decision history — not a generic "someone mentioned you" ping.
+5. **It's checked against policy.** A policy engine gates every notification before it goes out, so certain categories (e.g. hiring decisions) can be blocked from ever being surfaced.
+6. **You get pinged on Slack.** A DM arrives with the context and the drafted answer, plus **Approve / Edit / Reject** buttons — so you can step away from the call entirely and still respond the instant something needs you.
+7. **You catch up instantly.** The side panel updates live to reflect your response, and the exact transcript line that triggered the notification turns red — so if you jump back into the meeting, you're already caught up, as if you'd been listening the whole time.
+
+## Key Features
+
+- **Live, chat-style transcript feed** — the meeting transcript renders like a live chat (à la YouTube Live), auto-scrolling as new lines arrive, with a "jump to latest" control if you scroll up to read history.
+- **Notification-triggering lines highlighted in red** — instantly see which exact words caused a Slack ping, matched against the live transcript.
+- **Full situational awareness, not just alerts** — every kind of mention (direct request, action item, informational note, reference, or simple mention) is surfaced, so you always know what's happening in the meeting, not just when you're directly needed.
+- **Context-aware drafted answers** — Ghost doesn't just notify you, it proposes an answer, pulling relevant context from the meeting's own recent decision history.
+- **One-tap Slack response** — Approve, Edit, or Reject a drafted answer directly from Slack's interactive buttons; your choice reflects back into the extension UI live.
+- **Policy-gated notifications** — a Cedar-based policy engine sits in front of every notification and can deny sensitive categories outright, fail-closed on any error.
+- **Speaker diarization with manual override** — speakers are automatically distinguished via AWS Transcribe diarization (majority-vote resolved per utterance for accuracy), with a manual override control if a label needs correcting.
+- **Durable meeting memory** — the full transcript and every detected decision persist to a Postgres database (Neon), so nothing is lost when the side panel closes and reopens mid-meeting.
+- **Debounced, batched notifications** — related moments are coalesced into a single Slack DM instead of a flood of pings.
+- **Transparent to the meeting** — the tab audio stays audible locally while being captured; nothing about the call changes for anyone else.
+
+## Built With AWS
+
+AWS powers the entire speech-to-text layer: the backend streams live Google Meet audio to **AWS Transcribe Streaming**, which returns real-time, speaker-diarized transcripts as the meeting happens. Speaker labels are resolved per utterance using a majority-vote approach across labeled words (correcting for diarization jitter) and normalized into a consistent identity used throughout the rest of the pipeline — this transcript is the single source of truth for decision detection, the live transcript feed, and persisted meeting history.
+
+The LLM-based decision-classification stage — the two-tier system deciding whether a moment needs your attention, and drafting the suggested response — runs on **AWS Bedrock**, invoking a Claude Haiku model directly through Bedrock's `invoke_model` API. Both the transcription and reasoning-over-transcript layers run on AWS, with Slack notification, policy enforcement, and Postgres persistence built around what those two services produce.
+
+## Architecture
+
+```
+ Google Meet tab audio
+          │
+          ▼
+ Chrome Extension  ──(WebSocket, PCM16 audio)──►  FastAPI Backend
+ (capture + side                                        │
+  panel UI)                                              ▼
+          ▲                                   AWS Transcribe Streaming
+          │                                   (live, speaker-diarized transcript)
+          │                                              │
+          │                                              ▼
+          │                                  Two-tier decision detection
+          │                                  (regex name-watch + AWS Bedrock LLM)
+          │                                              │
+          │                                              ▼
+          │                                      Cedar policy gate
+          │                                              │
+          │                                              ▼
+          │                                    Context-aware answer drafting
+          │                                              │
+          │                        ┌─────────────────────┼─────────────────────┐
+          │                        ▼                                           ▼
+          │                Slack DM (interactive                    Postgres / Neon
+          │                Approve/Edit/Reject)                (transcript + decision history)
+          │                        │
+          └──── live WebSocket push (status updates, transcript) ────┘
+```
+
+The backend is deliberately split into two bounded modules with a shared core between them:
+
+- **`transcription/`** — owns everything from raw audio to a finished transcript event. AWS-specific code lives only here.
+- **`notifications/`** — owns everything from an accepted decision to an outbound Slack DM and the inbound button click that comes back. Slack-specific code lives only here.
+- **A shared core** (decision detection, persistence, database, config) sits between them and knows about neither AWS nor Slack directly — keeping the transcription and notification concerns independently testable and swappable.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Extension | Chrome Manifest V3 — `tabCapture`, offscreen document, side panel |
+| Audio processing | Web Audio API (`ScriptProcessorNode`), 16 kHz, 16-bit PCM |
+| Backend | FastAPI, WebSockets, Uvicorn |
+| Speech-to-text | AWS Transcribe Streaming (speaker diarization) |
+| Decision detection & drafting | AWS Bedrock (Claude Haiku) |
+| Policy engine | Cedar (`cedarpy`) |
+| Notifications | Slack SDK — Block Kit, interactive buttons, webhooks |
+| Database | PostgreSQL (Neon), async via SQLAlchemy + `asyncpg` |
+| Search | OpenSearch (optional, falls back to Postgres) |
+
+## Repository Structure
+
+```
+aws-project/
+├── extension/                     # Chrome extension (Manifest V3)
+│   ├── manifest.json
+│   ├── background.js              # service worker: capture lifecycle, session state
+│   ├── offscreen.js               # audio pipeline + WebSocket relay to backend
+│   ├── sidepanel.js / .html / .css # live transcript feed + decision UI
+│   └── messages.js                # shared cross-context message contract
+├── backend/                       # FastAPI server
+│   ├── main.py                    # composition root
+│   ├── transcription/             # BOUNDARY 1 — audio -> transcript (AWS)
+│   ├── notifications/             # BOUNDARY 2 — decision -> Slack DM, and back
+│   ├── decision_detector.py       # shared: two-tier detection pipeline
+│   ├── decision_store.py          # shared: decision persistence
+│   ├── transcript_store.py        # shared: full-transcript persistence
+│   ├── database.py / config.py    # shared: Postgres models, settings
+│   └── tests/
+├── slack-app/                     # Slack app manifest (scopes, interactivity config)
+├── scripts/                       # standalone test/demo utilities
+├── docker-compose.yml             # local Postgres + OpenSearch
+└── CLAUDE.md                      # full technical build log and design decisions
+```
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12+, Docker (for local Postgres), Google Chrome
+- AWS credentials with Transcribe Streaming + Bedrock access (for real transcription/detection)
+- A Slack app + bot token (for real Slack delivery)
+
+### Backend
 
 ```bash
 cd backend
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-Postgres is required (the sole database — no SQLite fallback):
+# Postgres (repo root)
+docker compose up -d postgres
 
-```bash
-docker compose up -d postgres   # repo root — brings up postgres:16 with user/password/db "ghost"
-```
-
-Copy the env template and fill in real credentials:
-
-```bash
+# Configure credentials
 cp ../.env.example .env
-# then edit backend/.env — DATABASE_URL defaults to the docker-compose postgres service above;
-# change it if you're pointing at a different Postgres instance
-```
+# edit backend/.env with your AWS / Bedrock / Slack / database credentials
 
-Run the backend:
-
-```bash
+# Run
 uvicorn main:app --reload
+
+# Verify
+curl http://localhost:8000/health   # {"status":"ok"}
 ```
 
-Verify it's up:
+### Extension
+
+1. Open `chrome://extensions`, enable **Developer mode**.
+2. Click **Load unpacked**, select the `extension/` folder.
+3. Open a `meet.google.com` tab, click the extension icon to open the side panel.
+4. First time only: fill in your name and Slack ID on the setup screen, **Save & Continue**.
+5. Click **Start listening** — grant tab-audio capture permission when prompted.
+
+### Slack App
+
+`slack-app/manifest.yaml` is the starting app manifest (scopes: `chat:write`, `im:write`, `users:read.email`, plus interactivity enabled). Create/install the app from it in your Slack workspace, point its Interactivity request URL at your backend (e.g. via `ngrok http 8000`), and drop the bot token into `backend/.env`.
+
+## Try It in 2 Minutes (No AWS/Slack Setup Needed)
+
+The backend ships with a **text-injection demo mode** that replays a scripted transcript without needing real AWS credentials — the fastest way to see the full pipeline run:
 
 ```bash
-curl http://localhost:8000/health
-# {"status":"ok"}
-```
-
-Run tests:
-
-```bash
-pytest
-```
-
-## Extension setup
-
-1. Open `chrome://extensions` in Chrome.
-2. Enable "Developer mode" (top-right toggle).
-3. Click "Load unpacked" and select the `extension/` directory.
-4. Confirm "AI Meeting Ghost" appears with no errors, and that its icon shows up in the toolbar.
-5. Open a `meet.google.com` tab (a real or empty call works), then click the extension's toolbar
-   icon — the side panel should open.
-6. First time only: fill in the identity setup screen — your name (Tier 1's watch-name regex uses
-   this), optional other name variants, and your Slack user ID or email — then "Save & Continue".
-   This is stored in `chrome.storage.local` and only asked once; Start is hidden until it's filled
-   in. Nothing starts capturing yet at this point.
-7. Click "Start listening". Chrome should prompt for tab-audio capture permission the first
-   time; after that the status area should read "Ghost is listening." Confirm you do **not**
-   hear the meeting audio play a second time — that would mean the audio graph is wired to
-   `audioContext.destination` instead of the silent sink, which must never happen.
-8. Try the speaker-override input (below the status area) — enter a label like `spk_0` and a name,
-   click Apply. Check the backend log for "speaker override applied" to confirm it reached the
-   server mid-session.
-9. Click "Stop Ghost" — the status should return to "Ghost is idle." and the Start button should
-   reappear. Closing the Meet tab (or navigating it away from meet.google.com) while capturing
-   should trigger the same automatic stop.
-10. Check `chrome://extensions` → service worker "Inspect views" and the offscreen document's
-    console for errors during the above.
-
-## Testing audio capture without the real backend (Phase 1)
-
-`scripts/test_ws_echo.py` is a throwaway WebSocket server that logs the byte length of every
-binary PCM frame it receives, so the capture pipeline can be verified before Phase 2's real
-backend exists.
-
-```bash
-source backend/.venv/bin/activate   # already has `websockets` installed
-python3 scripts/test_ws_echo.py     # listens on ws://localhost:8765
-```
-
-Point the extension at it — open the side panel, inspect it (right-click → Inspect), and in its
-devtools console run:
-
-```js
-chrome.storage.local.set({ backendUrl: "ws://localhost:8765" })
-```
-
-Click "Start listening" on a `meet.google.com` tab and watch the echo server's terminal log
-frame sizes (8192 bytes per frame — 4096 samples × 2 bytes for 16-bit PCM) and a running total
-every 10 frames.
-
-Switch back once Phase 2's real backend is up:
-
-```js
-chrome.storage.local.set({ backendUrl: "ws://localhost:8000/ws/transcribe" })
-// or: chrome.storage.local.remove("backendUrl") to fall back to that same default
-```
-
-## Testing the ASR relay (Phase 2)
-
-`/ws/demo` skips real ASR entirely and streams the scripted transcript in
-`backend/fixtures/demo_transcript.json` (edit that file, not endpoint code, to change the demo
-script). Every connection — demo or real — now requires a `session_init` control message first
-(Phase 4; see below), so a bare client needs to send that before anything else. Confirm it with
-any WebSocket client:
-
-```bash
-source backend/.venv/bin/activate
+cd backend && source .venv/bin/activate
 python3 -c "
 import asyncio, json, websockets
 async def main():
     async with websockets.connect('ws://localhost:8000/ws/demo') as ws:
         await ws.send(json.dumps({
             'type': 'session_init',
-            'watched_user_name_variants': ['Sarah'],  # matches the demo script
+            'watched_user_name_variants': ['Sarah'],
             'slack_target': 'you@example.com',
         }))
         async for msg in ws:
@@ -126,213 +200,12 @@ asyncio.run(main())
 "
 ```
 
-You should see one JSON transcript event roughly every 2 seconds.
+Point the extension at `/ws/demo` (from the side panel's devtools console: `chrome.storage.local.set({ backendUrl: "ws://localhost:8000/ws/demo" })`) to watch the same scripted meeting play out live in the transcript feed and decision list.
 
-`/ws/transcribe` is the real path and needs working AWS Transcribe credentials in `backend/.env`
-— without them the connection announces a session id and then closes (the AWS call fails and the
-socket closes with code 1011; watch the server log for the failure). AWS Transcribe Streaming is
-the sole ASR provider — there is no fallback. To test it without a live Google Meet call:
+## Project Status
 
-```bash
-python3 scripts/feed_wav_file.py                          # uses the bundled sample WAV
-python3 scripts/feed_wav_file.py path/to/real_recording.wav
-python3 scripts/feed_wav_file.py --watch-name Aman --watch-name "Aman Kumar" --slack-target you@example.com
-```
+The full pipeline — audio capture → diarized transcription → decision detection → policy check → drafted answer → Slack delivery → live UI update → persistence — is built and has been verified end to end against **real** AWS Transcribe, AWS Bedrock, Neon Postgres, and Slack, not just mocks. The extension side panel reflects live and historical state without a manual refresh, including a live-updating transcript feed with retroactive highlighting of notification-triggering lines.
 
-It sends the mandatory `session_init` handshake (Phase 4) before any audio; `--watch-name` is
-repeatable and defaults to a name that won't match real speech, since this script is for
-exercising ASR — pass your own name too if you also want it to exercise decision detection.
+## Learn More
 
-`scripts/sample_audio/two_speakers_sample.wav` is a synthetic placeholder (two alternating tones,
-not real speech) generated for this repo since no real recording was available — it proves the
-streaming/chunking plumbing works, not transcription quality. Swap in a real ~20s two-person
-recording to actually exercise ASR and diarization.
-
-## Testing decision detection (Phase 3)
-
-`backend/decision_detector.py` turns final transcript events into batched `DecisionRecord`s. Its
-own unit tests (`backend/tests/test_decision_detector.py`) fake the LLM call, so they run fast
-and need no credentials:
-
-```bash
-cd backend && source .venv/bin/activate && pytest tests/test_decision_detector.py -v
-```
-
-Detection is off by default per session — `DecisionPipeline.set_watch_names(meeting_id, names)`
-must be called with the names to watch for, or Tier 1 never matches anything. As of Phase 4 this
-is driven by the `session_init` handshake below, for both `/ws/demo` and real `/ws/transcribe`
-sessions.
-
-With real AWS Transcribe credentials and `LLM_API_KEY` both pointing at working credentials,
-running `scripts/feed_wav_file.py` against a real two-person recording exercises the full path —
-audio → transcript → decision detection — and any detected batch gets logged to the server console
-and persisted to Postgres (see Phase 5 below). A wrong/missing `LLM_API_KEY` fails gracefully:
-Tier 2 logs the failure and the window is treated as "not a decision" rather than crashing the
-session.
-
-## Session identity + Cedar/Slack notification (Phase 4)
-
-Every `/ws/transcribe` and `/ws/demo` connection now requires a `session_init` control message as
-its first client-sent frame:
-
-```json
-{
-  "type": "session_init",
-  "watched_user_name_variants": ["Aman", "Aman Kumar"],
-  "slack_target": "aman@example.com"
-}
-```
-
-Missing it, or sending anything else first, gets a `{"type": "error", ...}` reply and the socket
-closes (code 1008) — there's no silent fallback to a hardcoded name. A `speaker_override` control
-message (`{"type": "speaker_override", "label": "spk_0", "name": "Priya"}`) can follow at any
-point later in the same connection and takes effect immediately.
-
-Run the Phase 4 tests (all fake the LLM/Slack calls, so no credentials needed):
-
-```bash
-cd backend && source .venv/bin/activate
-pytest tests/test_session_init.py tests/test_notification_pipeline.py tests/test_slack_webhook.py -v
-```
-
-To actually receive a Slack DM end-to-end, you'll need:
-
-1. Real `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET` in `backend/.env`, and a Slack app installed from
-   `slack-app/manifest.yaml` (includes `chat:write`, `im:write`, `users:read.email`).
-2. `ngrok http 8000` (or similar) to get a public URL, and the Slack app's Interactivity request
-   URL updated to `https://<ngrok-url>/slack/interaction` — a manual step in the Slack app config
-   (see CLAUDE.md conventions).
-3. A real `LLM_API_KEY` — both decision detection (Tier 2) and answer drafting call it.
-4. A `session_init` whose `watched_user_name_variants` actually appears in the transcript (the
-   bundled demo script says "Sarah"), and a real `slack_target` (your Slack user ID or email) to
-   receive the DM.
-
-`backend/policies/decisions.cedar` forbids `hiring`-classified decisions as a working example of
-a real deny — edit it to add more rules; `cedar_policy.check_decision_policy` fails closed on any
-parse/evaluation error, so a broken policy file blocks notifications rather than allowing them
-through.
-
-## Persistence + search (Phase 5, migrated from SQLite to PostgreSQL)
-
-Decisions persist in Postgres (schema created automatically on startup; Postgres handles
-concurrent writes from decision creation and the Slack webhook natively, no special setup needed).
-`backend/decision_store.py`'s `DecisionStore` interface is unchanged from Phase 4 —
-`PostgresDecisionStore` (originally `SQLiteDecisionStore`, migrated — see CLAUDE.md's migration
-note) just replaced the interim `JSONLDecisionStore`. `id` is a native Postgres `UUID` column and
-`status` a native `ENUM` covering exactly `pending`/`approved`/`rejected`/`denied_by_policy`/
-`answered_live` — writing any other status value is a database-level error.
-
-```bash
-docker compose up -d postgres             # repo root — must be running before the tests below
-cd backend && source .venv/bin/activate
-pytest tests/test_postgres_connectivity.py -v   # connectivity smoke test — run this first
-pytest tests/test_database.py -v                # concurrency + lifecycle
-```
-
-OpenSearch is optional and additive — Postgres stays the source of truth either way. For local dev:
-
-```bash
-docker compose up -d       # repo root — brings up both postgres and opensearch
-```
-
-Then set `OPENSEARCH_HOST=http://localhost:9200` in `backend/.env` (leave `OPENSEARCH_USER`/
-`OPENSEARCH_PASSWORD` blank — the compose file disables the security plugin for local-dev
-simplicity). With it unset or unreachable, `GET /search?q=` transparently falls back to a Postgres
-`LIKE` query — nothing hard-fails. (Its JSON response still labels this `"source": "sqlite_fallback"`,
-a naming leftover from before the Postgres migration — see CLAUDE.md's migration note for why
-that's left as-is.)
-
-```bash
-curl "http://localhost:8000/search?q=ship%20date"
-```
-
-```bash
-pytest tests/test_opensearch_client.py -v   # mapping/document/query shape, mocked client
-pytest tests/test_search_endpoint.py -v     # real fallback (genuinely unreachable host, no
-                                             # Docker needed) + a real OpenSearch check that
-                                             # skips itself if docker-compose isn't up
-```
-
-> This repo's own sandbox can't run Docker (nested containerization isn't available, and image
-> pulls are blocked by egress policy), so `opensearch_client.py` is verified here against a fake
-> client plus a real unreachable-host fallback check — not against a live OpenSearch. If you have
-> Docker available, `docker compose up -d` then `pytest tests/test_search_endpoint.py -v` will
-> also exercise the real integration path.
-
-## Side panel UI (Phase 6)
-
-The side panel now reflects live and historical decision state without a manual refresh. After
-Start/Stop and the setup screen (Phase 1/4), it renders:
-
-- The **listening indicator** — a pulsing cyan dot + "Ghost is listening" whenever capture is
-  connected/reconnecting, with the session id and a "since HH:MM:SS" line beneath.
-- A **decision list** — one card per decision (speaker, timestamp, decision text, a colored status
-  badge: cyan `pending`, green `approved`, gray `rejected`, red `denied_by_policy`, violet
-  `answered_live`). All decision-derived text is inserted via `textContent`, never `innerHTML`.
-- A **triggered/answered view** — when a decision moves to `approved`/`answered_live`, it's pinned
-  above the list with the exact question, the drafted answer, and an "Answer sent"/"Take over
-  live" line, mirroring the Slack DM.
-- A **backend-unreachable message + retry button** if the initial `GET /decisions` hydration call
-  fails, instead of silently showing an empty list.
-- A **search box** (P2) — 300ms-debounced `GET /search?q=&meeting_id=`; clearing the query restores
-  the full list from in-memory state without refetching.
-
-**How live pushes reach the panel:** `backend/session_connections.py` is a registry mapping
-`meeting_session_id` -> the live WebSocket on `/ws/transcribe`/`/ws/demo`, so code that doesn't
-hold that WebSocket directly (`notification_pipeline.py`, `slack_webhook.py`) can still push to
-it. After Cedar + drafting complete, `notification_pipeline.py` pushes
-`{"type": "decision_batch", "meeting_id": ..., "decisions": [...]}` — every decision in the batch,
-allowed or denied, each carrying a `drafted_answer` key (allowed only; not part of `DecisionRecord`
-itself — Phase 3/4 deliberately keep drafts un-persisted, so this is an extra key on the pushed
-JSON only, reusing the same draft already computed for Slack). When a Slack button click updates a
-decision's status, `slack_webhook.py` pushes
-`{"type": "decision_status_update", "decision_id": ..., "status": ..., "approved_by": ...}` the
-same way. `offscreen.js` relays both (as `DECISION_BATCH`/`DECISION_STATUS_UPDATE`
-`chrome.runtime` messages — see `extension/messages.js`) to the side panel, along with the
-backend-confirmed session id (`SESSION_ID_ASSIGNED`) the very first time `/ws/transcribe` responds
-with `{"meeting_session_id": ...}` — that id (stored under the new `chrome.storage.session` key
-`ghostPanelSessionId`, distinct from `background.js`'s own client-generated `ghostSession` id,
-which the backend never actually uses) is what `GET /decisions`/`GET /search` calls are scoped by.
-Demo mode (`/ws/demo`) never sends that announcement, so the panel picks up `demo-meeting` from the
-first `decision_batch` push instead.
-
-`GET /decisions?meeting_id=` (new this phase) hydrates the panel's list on open/reopen; it's a thin
-wrapper over the same `decision_store.get_recent` Phase 5 already had, added because the panel
-needs a way to backfill state that predates it being open — live pushes on top of that, not instead
-of it. Historical decisions from it never carry `drafted_answer` (never persisted); only ones
-pushed live while the panel is open do.
-
-`extension/manifest.json` adds `http://localhost:8000/*` to `host_permissions` so the panel's
-`fetch()` calls to `GET /decisions`/`GET /search` aren't blocked by CORS — Chrome extension pages
-with a matching host permission bypass CORS entirely, so `main.py` didn't need `CORSMiddleware`.
-
-Run the Phase 6 backend tests (the new push wiring; no browser needed):
-
-```bash
-cd backend && source .venv/bin/activate
-pytest tests/test_session_connections.py tests/test_notification_pipeline.py tests/test_slack_webhook.py -v
-```
-
-Manual panel tests (no automated harness on the extension side):
-
-1. Point `backendUrl` at `/ws/demo` (see the Phase 2 section above), open the side panel, click
-   Start — a decision card should appear within ~2s of the scripted transcript triggering one,
-   with the right speaker/text/`pending` badge.
-2. Approve a decision from a real (or test) Slack DM — the panel should switch to the
-   triggered/answered view without a manual refresh or panel reopen.
-3. Stop the backend, then open the panel — the "Can't reach Ghost's backend" message and Retry
-   button should appear instead of a blank list; restart the backend and click Retry.
-4. Type a query matching one decision's text into the search box — only that decision should show;
-   clear the query — the full list returns without an extra network call.
-5. In demo mode, edit `backend/fixtures/demo_transcript.json` so a decision's text contains
-   `<b>test</b>` — it should render as the literal string in the card, not as bold markup.
-
-## Slack app
-
-`slack-app/manifest.yaml` is the starting app manifest (scopes, interactivity config). Slack app
-creation/install is a manual step — see CLAUDE.md conventions.
-
-## Full context
-
-Read [CLAUDE.md](./CLAUDE.md) before making changes — it holds the locked scope, non-negotiable
-behaviors, and build order this project follows.
+[CLAUDE.md](./CLAUDE.md) holds the complete technical build log: every locked scope decision, non-negotiable behavior, module boundary, and the reasoning behind every non-obvious engineering choice made while building this — useful for anyone digging into the implementation in depth.
