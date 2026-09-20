@@ -203,6 +203,18 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   separate context list) — `state.buffer = window_events[-3:]` after each close — so both Tier 1's
   regex and Tier 2's LLM call see carried lines alongside new ones. Window closes at 30s elapsed
   (by event timestamp, not wall clock) or 10 segments, whichever first.
+- **Tier 1 has a sticky-window extension** (`_NAME_MENTION_STICKY_SECONDS`, `_SessionState.
+  last_name_mention_at`): a real conversation typically says a watched name once and then keeps
+  addressing that person with "you"/"your" — the name itself never reappears. With only 3 lines of
+  carry-forward, the window containing the *actual* request ("can you review the API", "send us the
+  link") could fall entirely outside the carried text, so Tier 1's regex never matched it and it
+  never reached Tier 2 at all — not stored, not logged, not denied, simply dropped before entering
+  the pipeline. Confirmed against a real live-meeting transcript: a follow-up request one window
+  after the name was said was silently skipped until this fix. The window immediately following a
+  real name match now stays Tier-1-eligible even with no literal re-mention, decaying after
+  `_WINDOW_SECONDS * 2` (60s) so it doesn't stay open indefinitely. None of the existing decision_
+  detector fixtures exercise two close-in-time windows (they're single-window or spaced by design),
+  so this didn't change any documented test's expected behavior.
 - **Debounce timer is real wall-clock**, `asyncio.sleep(settings.debounce_window_seconds)` (12s
   default), separate from the window-closing logic above. Tests shorten
   `settings.debounce_window_seconds` directly (it's a mutable pydantic-settings singleton) rather

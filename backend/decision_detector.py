@@ -274,6 +274,26 @@ _WINDOW_SECONDS = 30
 _MAX_WINDOW_SEGMENTS = 10
 _CARRY_FORWARD_LINES = 3
 
+# A real conversation names someone once, then keeps addressing them
+# with "you"/"your" for the rest of the thread — the literal name never
+# reappears. With only _CARRY_FORWARD_LINES of text preserved across a
+# window boundary, that follow-up (often the actual request — "can you
+# review the API", "send us the link") falls out of the carried text
+# and Tier 1 never re-matches, so it's silently dropped before Tier 2
+# ever sees it: it isn't stored, isn't logged, and never has a chance
+# to be denied — it simply never enters the pipeline. Confirmed by
+# replaying a real transcript where "review the API"/"send the
+# dashboard link" — both directed at a person named earlier — never
+# triggered classification for exactly this reason.
+#
+# _NAME_MENTION_STICKY_SECONDS keeps Tier 1 open for one further window
+# after a real name match, so the window immediately following a
+# mention is still eligible for Tier 2 even with no literal re-mention.
+# Time-based (not "one more window" as a counter) so it decays on its
+# own without extra state to reset; set to 2x the window length so
+# exactly one full follow-up window is covered, not an open-ended tail.
+_NAME_MENTION_STICKY_SECONDS = _WINDOW_SECONDS * 2
+
 
 @dataclass
 class _SessionState:
@@ -289,6 +309,10 @@ class _SessionState:
     # from the process-wide Settings object, which would only support
     # one watched user per backend instance.
     slack_target: str | None = None
+    # Timestamp of the last window whose text actually matched
+    # watch_names_pattern — drives the sticky-window Tier 1 extension
+    # above. None until the first real match.
+    last_name_mention_at: datetime | None = None
 
 
 # --- Pipeline --------------------------------------------------------------
@@ -387,10 +411,31 @@ class DecisionPipeline:
             state.buffer = window_events[-_CARRY_FORWARD_LINES:]
             state.window_start = None
 
+        if not state.watch_names_pattern:
+            return
+
         # Tier 1: fast regex check on a local snapshot, outside the
         # lock — pure computation, no need to hold up other events.
         window_text = " ".join(e.text for e in window_events)
-        if not state.watch_names_pattern or not state.watch_names_pattern.search(window_text):
+        name_mentioned_now = bool(state.watch_names_pattern.search(window_text))
+        window_end = window_events[-1].timestamp
+
+        # Sticky extension: also let through the window immediately
+        # following a real match, even with no literal re-mention here
+        # — see _NAME_MENTION_STICKY_SECONDS above for why. Checked
+        # before updating last_name_mention_at below, so a match here
+        # is judged against the *previous* mention, not itself.
+        stale_by = (
+            (window_end - state.last_name_mention_at).total_seconds()
+            if state.last_name_mention_at is not None
+            else None
+        )
+        sticky_hit = stale_by is not None and stale_by <= _NAME_MENTION_STICKY_SECONDS
+
+        if name_mentioned_now:
+            state.last_name_mention_at = window_end
+
+        if not (name_mentioned_now or sticky_hit):
             return
 
         # Tier 2 (the LLM call) can take up to LLM_TIMEOUT_SECONDS to
