@@ -33,9 +33,9 @@ import {
   DECISION_BATCH,
   DECISION_STATUS_UPDATE,
   TRANSCRIPT_EVENT,
+  GET_SESSION_STATE,
 } from './messages.js';
 
-const SESSION_STATE_KEY = 'ghostSession';
 const IDENTITY_STORAGE_KEY = 'ghostIdentity';
 // Distinct from background.js's `ghostSession.meetingSessionId` — that
 // one is generated client-side and never reaches the backend as the
@@ -726,9 +726,15 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // Restore whatever state background.js already has on open, so
 // reopening the panel mid-capture (or after a service-worker restart)
-// shows the right controls instead of always defaulting to idle.
+// shows the right controls instead of always defaulting to idle. Asks
+// background.js for its state via GET_SESSION_STATE rather than
+// reading chrome.storage.session directly — background.js reconciles
+// the stored flag against whether a capture pipeline is actually alive
+// before answering, so a stale "capturing" flag left over from an
+// offscreen document that died outside the normal stop/error flow
+// can't make the listening indicator show up before Start is clicked.
 async function restoreState() {
-  const { [SESSION_STATE_KEY]: state } = await chrome.storage.session.get(SESSION_STATE_KEY);
+  const state = await chrome.runtime.sendMessage({ type: GET_SESSION_STATE, target: 'background' });
 
   if (state && state.status === 'capturing') {
     panelState.captureStatus = 'capturing';

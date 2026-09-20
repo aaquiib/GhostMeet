@@ -20,3 +20,13 @@ export const SESSION_ID_ASSIGNED = 'SESSION_ID_ASSIGNED';
 export const DECISION_BATCH = 'DECISION_BATCH';
 export const DECISION_STATUS_UPDATE = 'DECISION_STATUS_UPDATE';
 export const TRANSCRIPT_EVENT = 'TRANSCRIPT_EVENT';
+// sidepanel -> background, sent on every panel open: asks background.js
+// to reconcile its stored chrome.storage.session status against whether
+// a capture pipeline is actually alive (offscreen.hasDocument()) before
+// handing it back, rather than the panel trusting the stored flag
+// as-is. See background.js's GET_SESSION_STATE handler for why —
+// without this, a stale "capturing" flag left behind by an offscreen
+// document that died outside the normal stop/error path (e.g. a dev
+// extension reload) makes the listening indicator show on next open
+// even though Start was never clicked this session.
+export const GET_SESSION_STATE = 'GET_SESSION_STATE';

@@ -14,6 +14,7 @@ import {
   CAPTURE_STOPPED,
   CAPTURE_ERROR,
   SPEAKER_OVERRIDE,
+  GET_SESSION_STATE,
 } from './messages.js';
 
 const SESSION_STATE_KEY = 'ghostSession';
@@ -33,6 +34,22 @@ async function setSessionState(patch) {
   const next = { ...current, ...patch };
   await chrome.storage.session.set({ [SESSION_STATE_KEY]: next });
   return next;
+}
+
+// The stored flag alone isn't trustworthy: it's only ever updated by
+// the normal start/stop/error message flow, so if the offscreen
+// document (and with it the whole capture pipeline) goes away outside
+// that flow — a dev-time extension reload being the common case — the
+// flag is left saying "capturing" with nothing actually running.
+// Reconciling against the real chrome.offscreen.hasDocument() truth
+// before handing state back to the panel self-heals that instead of
+// letting a stale flag show the listening indicator on next open.
+async function reconciledSessionState() {
+  const state = await getSessionState();
+  if (state.status !== 'capturing') return state;
+  const hasDoc = await chrome.offscreen.hasDocument();
+  if (hasDoc) return state;
+  return setSessionState(IDLE_STATE);
 }
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -112,7 +129,7 @@ async function stopIfCapturingTab(tabId) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.type !== 'string') return;
 
   switch (message.type) {
@@ -145,6 +162,12 @@ chrome.runtime.onMessage.addListener((message) => {
       if (message.target === 'sidepanel') {
         setSessionState({ status: 'error' });
         closeOffscreenDocument();
+      }
+      break;
+    case GET_SESSION_STATE:
+      if (message.target === 'background') {
+        reconciledSessionState().then(sendResponse);
+        return true; // keep the message channel open for the async sendResponse above
       }
       break;
     default:
