@@ -27,7 +27,7 @@ Ghost does not dial into a meeting unattended. "Can't attend" means a muted brow
 - **Cedar policy check gates every notification.** "Deny" means log the decision, send nothing.
 - **Stop condition:** manual "Stop Ghost" control in the side panel, plus detecting the Meet tab closing.
 - **Consent indicator:** a persistent "Ghost is listening" element in the side panel whenever capture is active.
-- Only DIRECT_REQUEST and ACTION_REQUIRED mention types reach Slack; INFORMATIONAL, REFERENCE, and NO_ACTION mentions are stored but never notified.
+- **All five mention types reach Slack** (changed from the original design): DIRECT_REQUEST, ACTION_REQUIRED, INFORMATIONAL, REFERENCE, and NO_ACTION are all notified, not just the two actionable types. Deliberate: the user wants FYI-level visibility into what's happening in the meeting, not just moments needing their direct input. Only DIRECT_REQUEST/ACTION_REQUIRED get a real drafted answer (`notifications/notification_pipeline.py`'s `_NO_DRAFT_NEEDED_TEXT` placeholder is used for the other three, with no LLM call — there's no real question to draft an answer to). `is_actionable()` (`decision_detector.py`) is kept for exactly this drafting decision even though it no longer gates notification itself.
 
 ## Repo structure
 

@@ -2,16 +2,20 @@
 Owns composing and sending the Slack DM for a coalesced decision
 batch: Block Kit layout (header, mention type, context, the verbatim
 mention as a blockquote, the drafted-answer text, a status line, and a
-single "✓ Done" button) for each actionable decision in the batch.
-Talks to Slack via slack-sdk using SLACK_BOT_TOKEN — but the DM
-*target* always comes from the caller (the session's session_init
-identity), never from Settings or a hardcoded value here.
+single "✓ Done" button) for each decision in the batch. Talks to Slack
+via slack-sdk using SLACK_BOT_TOKEN — but the DM *target* always comes
+from the caller (the session's session_init identity), never from
+Settings or a hardcoded value here.
 
 The old three-button (Approve/Reject/Join & Answer Live) layout is
-gone entirely — see CLAUDE.md's mention-type migration note. Only
-DIRECT_REQUEST/ACTION_REQUIRED decisions (decision_detector.py's
-is_actionable) ever reach this module; notification_pipeline.py is
-what filters to that set before calling send_batch_notification.
+gone entirely — see CLAUDE.md's mention-type migration note. All five
+mention types reach this module now, not just DIRECT_REQUEST/
+ACTION_REQUIRED (see CLAUDE.md's non-negotiable-behaviors note on this
+— Cedar-allowed decisions of every type are notified for FYI-level
+visibility); notification_pipeline.py is what Cedar-filters before
+calling send_batch_notification, and supplies
+_NO_DRAFT_NEEDED_TEXT in place of a real drafted answer for the three
+non-actionable types.
 """
 
 import logging
