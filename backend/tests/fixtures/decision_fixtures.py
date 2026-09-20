@@ -9,7 +9,7 @@ wall-clock time for it.
 
 from datetime import datetime, timedelta, timezone
 
-from asr_base import TranscriptEvent
+from transcription import TranscriptEvent
 
 MEETING_ID = "test-meeting"
 

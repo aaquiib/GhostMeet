@@ -15,7 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import main
 from decision_detector import decision_pipeline
-from demo_mode import DEMO_MEETING_ID
+from transcription.demo_mode import DEMO_MEETING_ID
 
 client = TestClient(main.app)
 

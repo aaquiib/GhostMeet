@@ -1,8 +1,8 @@
 """
 Shared ASR provider contract: the abstract interface a provider
 implements (currently just AWSTranscribeProvider — see
-transcribe_handler.py), and the TranscriptEvent shape it must produce.
-Kept as its own interface (not collapsed into transcribe_handler.py)
+aws_transcribe.py), and the TranscriptEvent shape it must produce.
+Kept as its own interface (not collapsed into aws_transcribe.py)
 so a provider is still mockable for tests even with only one real
 implementation. Nothing provider-specific belongs here, and nothing
 provider-specific is allowed to leak past this boundary into the rest

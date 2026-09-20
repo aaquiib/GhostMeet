@@ -41,17 +41,51 @@ ghost/
 │   ├── sidepanel.html
 │   └── sidepanel.js
 ├── backend/             # FastAPI server
-│   ├── main.py
-│   ├── transcribe_handler.py
-│   ├── decision_detector.py
-│   ├── cedar_policy.py
-│   ├── slack_notifier.py
-│   ├── slack_webhook.py
-│   ├── opensearch_client.py
+│   ├── main.py                    # composition root — the only module that imports both boundaries
+│   ├── transcription/             # BOUNDARY 1: audio -> TranscriptEvent (AWS)
+│   │   ├── asr_base.py            # ASRProvider contract + TranscriptEvent
+│   │   ├── aws_transcribe.py      # AWS Transcribe Streaming (sole provider)
+│   │   ├── demo_mode.py           # scripted text-injection stand-in
+│   │   └── fixtures/
+│   ├── notifications/             # BOUNDARY 2: DecisionRecord -> Slack DM, and back
+│   │   ├── notification_pipeline.py
+│   │   ├── cedar_policy.py
+│   │   ├── answer_drafter.py
+│   │   ├── slack_notifier.py      # outbound DM
+│   │   ├── slack_webhook.py       # inbound interactivity
+│   │   └── policies/
+│   ├── decision_detector.py       # shared core: detection pipeline + DecisionRecord
+│   ├── decision_store.py          # shared core: persistence
 │   ├── database.py
-│   └── demo_mode.py
+│   ├── opensearch_client.py
+│   ├── session_connections.py
+│   ├── groq_llm.py
+│   └── config.py
 └── slack-app/           # Slack app configuration
 ```
+
+## Module boundaries (backend)
+
+The backend is split into two bounded sides with a shared core between them:
+
+- **`transcription/`** owns everything from audio to `TranscriptEvent`. The `amazon_transcribe`
+  SDK is imported in `transcription/aws_transcribe.py` and nowhere else, and no AWS-specific type
+  is allowed past `asr_base.TranscriptEvent`. This package knows nothing about decisions, Cedar,
+  or Slack.
+- **`notifications/`** owns everything from an accepted `DecisionRecord` to an outbound Slack DM
+  and the inbound button click that comes back. `slack_sdk` is imported only inside this package.
+  It knows nothing about audio, ASR providers, or `TranscriptEvent`.
+- **The shared core** (`decision_detector.py`, `decision_store.py`, `database.py`,
+  `opensearch_client.py`, `session_connections.py`, `groq_llm.py`, `config.py`) sits between them
+  and imports neither boundary's internals — `decision_detector.py` takes only `TranscriptEvent`
+  from `transcription`, and hands finished batches to an injected callback rather than calling
+  Slack itself.
+- **`main.py` is the composition root** — the only module that imports both sides, and where the
+  notification pipeline is attached to `decision_pipeline.on_decision_batch`. Each package's
+  `__init__.py` states its contract and re-exports exactly what crosses outward
+  (`transcription`: the contract types; `notifications`: `make_notification_pipeline` and
+  `slack_webhook_router`). Import across the boundary through those names, not by reaching into a
+  submodule, and keep provider SDKs behind the package that owns them.
 
 ## Tech stack
 
@@ -414,7 +448,7 @@ see the migration note after Phase 6 for the swap itself:**
 
 - **Deepgram is gone entirely, not just de-emphasized.** `DeepgramProvider`, its config
   (`DEEPGRAM_API_KEY`, `ASR_PROVIDER`), and the fallback-on-AWS-failure logic are all deleted, not
-  commented out. `transcribe_handler.get_asr_provider()` constructs and starts
+  commented out. `transcription.aws_transcribe.get_asr_provider()` constructs and starts
   `AWSTranscribeProvider` directly and unconditionally; a failure to start now propagates straight
   to the caller (`main.py`'s `ws_transcribe`, which still closes the socket with code 1011 on any
   `get_asr_provider` exception — that catch-all was never Deepgram-specific). The `ASRProvider`

@@ -3,6 +3,10 @@ Owns the streaming ASR connection: AWSTranscribeProvider, the sole
 ASRProvider implementation (asr_base.py) — AWS Transcribe Streaming is
 the only supported ASR path, no fallback provider. get_asr_provider()
 is the single entry point main.py uses to start it.
+
+Everything AWS-specific in this project lives behind this module: the
+`amazon_transcribe` SDK is imported here and nowhere else, and its
+types are translated into TranscriptEvent before anything leaves.
 """
 
 import logging
@@ -13,7 +17,7 @@ from amazon_transcribe.auth import StaticCredentialResolver
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.model import Result as AwsResult
 
-from asr_base import ASRProvider, MeetingLoggerAdapter, TranscriptEvent
+from transcription.asr_base import ASRProvider, MeetingLoggerAdapter, TranscriptEvent
 from config import settings
 
 logger = logging.getLogger("ghost.asr")

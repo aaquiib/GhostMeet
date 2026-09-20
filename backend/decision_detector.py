@@ -33,7 +33,7 @@ from typing import Awaitable, Callable, Iterable, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from asr_base import TranscriptEvent
+from transcription import TranscriptEvent
 from config import settings
 from groq_llm import GROQ_MODEL, GroqMessagesClient
 

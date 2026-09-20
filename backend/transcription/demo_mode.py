@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from asr_base import TranscriptEvent
+from transcription.asr_base import TranscriptEvent
 from decision_detector import decision_pipeline, handle_control_message
 
 logger = logging.getLogger("ghost.demo")

@@ -28,14 +28,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import answer_drafter
-import cedar_policy
 import session_connections
-import slack_notifier
 from config import settings
 from decision_detector import MentionType, decision_pipeline
 from decision_store import decision_store as shared_decision_store
-from notification_pipeline import make_notification_pipeline
+from notifications import answer_drafter, cedar_policy, slack_notifier
+from notifications.notification_pipeline import make_notification_pipeline
 from tests.fixtures.decision_fixtures import (
     MEETING_ID,
     action_required_mention,
