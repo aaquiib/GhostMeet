@@ -28,7 +28,7 @@ import logging
 from slack_sdk.web.async_client import AsyncWebClient
 
 from config import settings
-from decision_detector import DecisionRecord
+from decision_detector import DecisionRecord, is_actionable
 
 logger = logging.getLogger("ghost.slack")
 
@@ -58,6 +58,19 @@ def _humanize_mention_type(mention_type: str) -> str:
     return mention_type.replace("_", " ").title()
 
 
+def _has_actionable_decision(decisions_with_drafts: list[tuple[DecisionRecord, str]]) -> bool:
+    """True if at least one decision in the batch actually needs the
+    user's input (DIRECT_REQUEST/ACTION_REQUIRED). Drives both the
+    header and the fallback preview text below — a batch can now be
+    pure FYI (all five mention types reach Slack, not just the
+    actionable two), and "Action Required"/"needs your input" is
+    actively wrong on a batch where nothing is being asked. A mixed
+    batch (one real request alongside FYI mentions) still says "Action
+    Required" — that's true for the batch as a whole, since something
+    in it does need a response."""
+    return any(is_actionable(decision.mention_type) for decision, _ in decisions_with_drafts)
+
+
 def _escape_mrkdwn(text: str) -> str:
     """Slack's mrkdwn escaping for the three characters it treats
     specially (&, <, >). context/mention_quote/the drafted answer all
@@ -79,10 +92,15 @@ async def _resolve_channel(slack_target: str) -> str:
 
 
 def _build_blocks(decisions_with_drafts: list[tuple[DecisionRecord, str]]) -> list[dict]:
+    header_text = (
+        "👻 Meeting Ghost — Action Required"
+        if _has_actionable_decision(decisions_with_drafts)
+        else "👻 Meeting Ghost — FYI"
+    )
     blocks: list[dict] = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "👻 Meeting Ghost — Action Required", "emoji": True},
+            "text": {"type": "plain_text", "text": header_text, "emoji": True},
         },
         {
             "type": "section",
@@ -132,9 +150,20 @@ async def send_batch_notification(
     channel = await _resolve_channel(slack_target)
     blocks = _build_blocks(decisions_with_drafts)
 
+    # This is Slack's notification-preview/fallback text (shown in
+    # mobile push previews and anywhere blocks can't render) — kept in
+    # sync with the header's actionable/FYI distinction above rather
+    # than always claiming input is needed.
+    count = len(decisions_with_drafts)
+    fallback_text = (
+        f"Ghost needs your input on {count} decision(s)."
+        if _has_actionable_decision(decisions_with_drafts)
+        else f"Ghost has {count} meeting update(s) for you."
+    )
+
     response = await _client.chat_postMessage(
         channel=channel,
-        text=f"Ghost needs your input on {len(decisions_with_drafts)} decision(s).",
+        text=fallback_text,
         blocks=blocks,
     )
     logger.info(
