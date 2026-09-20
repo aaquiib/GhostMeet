@@ -1,9 +1,12 @@
 """
-Shared ASR provider contract: the abstract interface every provider
-(AWS Transcribe, Deepgram) implements, and the single TranscriptEvent
-shape both must produce. Nothing provider-specific belongs here, and
-nothing provider-specific is allowed to leak past this boundary into
-the rest of the app.
+Shared ASR provider contract: the abstract interface a provider
+implements (currently just AWSTranscribeProvider — see
+transcribe_handler.py), and the TranscriptEvent shape it must produce.
+Kept as its own interface (not collapsed into transcribe_handler.py)
+so a provider is still mockable for tests even with only one real
+implementation. Nothing provider-specific belongs here, and nothing
+provider-specific is allowed to leak past this boundary into the rest
+of the app.
 """
 
 import logging
@@ -20,8 +23,8 @@ class MeetingLoggerAdapter(logging.LoggerAdapter):
     testing. Prepending to the message text (rather than relying on a
     %(meeting_session_id)s field in a shared formatter) means it can't
     break formatting for any other logger in the process — uvicorn's,
-    the AWS/Deepgram SDKs', or anything else — that doesn't carry this
-    field."""
+    the AWS Transcribe SDK's, or anything else — that doesn't carry
+    this field."""
 
     def process(self, msg, kwargs):
         return f"[meeting_session_id={self.extra['meeting_session_id']}] {msg}", kwargs

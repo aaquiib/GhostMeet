@@ -82,7 +82,7 @@ async def search(q: str, session: AsyncSession = Depends(database.get_session)) 
         return {"source": "opensearch", "results": results}
     except Exception:
         logger.warning(
-            "OpenSearch search failed or unavailable; falling back to SQLite", exc_info=True
+            "OpenSearch search failed or unavailable; falling back to Postgres", exc_info=True
         )
 
     pattern = f"%{q}%"
@@ -165,7 +165,7 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
     # session registry yet (that's Phase 5's job), so "recognized" here
     # just means "the client gave us one to reuse". Reusing it always
     # starts a NEW provider stream under that SAME meeting_session_id —
-    # an AWS/Deepgram streaming connection can't literally be resumed
+    # an AWS Transcribe streaming connection can't literally be resumed
     # once dropped, only re-opened under the same logical session.
     meeting_session_id = session_id or str(uuid.uuid4())
     if not session_id:
@@ -263,7 +263,7 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
         log.exception("error in transcribe session")
     finally:
         # Guaranteed even on exception or abrupt disconnect, so the
-        # AWS/Deepgram connection never leaks.
+        # AWS Transcribe connection never leaks.
         await provider.stop()
         session_connections.unregister(meeting_session_id, websocket)
         log.info("ASR provider stopped")

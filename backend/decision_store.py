@@ -1,15 +1,15 @@
 """
 Owns persistence for DecisionRecords: an abstract DecisionStore
-interface (get_recent, create, update_status) and SQLiteDecisionStore,
+interface (get_recent, create, update_status) and PostgresDecisionStore,
 the real implementation backed by the `decisions` table (database.py)
-via async SQLAlchemy. WAL journal mode (set in database.py) is what
-makes concurrent create()/update_status() calls — decision creation
-and the Slack webhook's status updates can both hit the DB at
-once — safe without "database is locked" errors.
+via async SQLAlchemy/asyncpg. Postgres handles concurrent
+create()/update_status() calls — decision creation and the Slack
+webhook's status updates can both hit the DB at once — natively, no
+journal-mode workaround needed the way SQLite required.
 
-SQLite is the source of truth. OpenSearch (opensearch_client.py) is a
+Postgres is the source of truth. OpenSearch (opensearch_client.py) is a
 best-effort search index kept alongside it: create()/update_status()
-call opensearch_client.index_decision() after the SQLite write
+call opensearch_client.index_decision() after the Postgres write
 succeeds, so callers of this interface never talk to OpenSearch
 directly — that composite behavior lives here, the one place the
 interface is implemented.
@@ -57,16 +57,16 @@ class DecisionStore(ABC):
 
 
 def _row_to_record(row: "database.Decision") -> DecisionRecord:
-    # SQLite has no native tz-aware datetime storage — SQLAlchemy
-    # strips tzinfo on the way back out. Every timestamp written here
-    # was already UTC (TranscriptEvent/DecisionRecord both use
+    # A plain (non-timezone) DateTime column strips tzinfo on the way
+    # back out, regardless of backend. Every timestamp written here was
+    # already UTC (TranscriptEvent/DecisionRecord both use
     # datetime.now(timezone.utc)), so reattaching it is safe and keeps
     # DecisionRecord's contract (tz-aware) consistent for callers.
     timestamp = row.timestamp
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return DecisionRecord(
-        id=uuid.UUID(row.id),
+        id=row.id,
         meeting_id=row.meeting_id,
         decision_text=row.decision_text,
         speaker=row.speaker,
@@ -79,12 +79,12 @@ def _row_to_record(row: "database.Decision") -> DecisionRecord:
     )
 
 
-class SQLiteDecisionStore(DecisionStore):
+class PostgresDecisionStore(DecisionStore):
     async def create(self, decision: DecisionRecord) -> None:
         async with database.async_session_maker() as session:
             session.add(
                 database.Decision(
-                    id=str(decision.id),
+                    id=decision.id,
                     meeting_id=decision.meeting_id,
                     decision_text=decision.decision_text,
                     speaker=decision.speaker,
@@ -92,7 +92,14 @@ class SQLiteDecisionStore(DecisionStore):
                     context=decision.context,
                     confidence=decision.confidence,
                     urgency=decision.urgency,
-                    timestamp=decision.timestamp,
+                    # asyncpg is strict where aiosqlite was lenient: it
+                    # rejects a tz-aware datetime outright against the
+                    # plain (non-timezone) TIMESTAMP column rather than
+                    # silently dropping the tzinfo. Every timestamp
+                    # here is already UTC (see _row_to_record), so
+                    # stripping it before the write is safe and keeps
+                    # the column's existing (non-tz) type unchanged.
+                    timestamp=decision.timestamp.replace(tzinfo=None),
                     status=decision.status,
                     approved_by=None,
                 )
@@ -116,7 +123,7 @@ class SQLiteDecisionStore(DecisionStore):
     ) -> DecisionRecord | None:
         async with database.async_session_maker() as session:
             result = await session.execute(
-                select(database.Decision).where(database.Decision.id == str(decision_id))
+                select(database.Decision).where(database.Decision.id == decision_id)
             )
             row = result.scalar_one_or_none()
             if row is None:
@@ -135,4 +142,4 @@ class SQLiteDecisionStore(DecisionStore):
         return updated_record
 
 
-decision_store = SQLiteDecisionStore()
+decision_store = PostgresDecisionStore()

@@ -3,8 +3,8 @@ Owns the /ws/demo text-injection path: streams a pre-scripted list of
 TranscriptEvent objects to the client, one every ~2 seconds, using the
 same shared TranscriptEvent model the real ASR path produces. This is
 the primary demo path (CLAUDE.md > Demo strategy) — it skips
-ASRProvider entirely, so it works even if AWS Transcribe/Deepgram
-setup is broken. The session_init handshake and route registration
+ASRProvider entirely, so it works even if AWS Transcribe setup is
+broken. The session_init handshake and route registration
 live in main.py (identical to /ws/transcribe); this module owns the
 scripted-send loop, the concurrent control-message loop, and the
 scripted data.

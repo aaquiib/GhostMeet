@@ -1,7 +1,10 @@
 """
-Tests SQLiteDecisionStore directly against the isolated test DB
-(tests/conftest.py): concurrent writes don't hit "database is locked"
-(proving WAL mode is actually active, not just configured), and a
+Tests PostgresDecisionStore directly against the isolated test DB
+(tests/conftest.py, a real Postgres connection — see
+test_postgres_connectivity.py for the standalone smoke test this
+depends on): several concurrent create()/update_status() calls (the
+same shape as real contention — decision creation racing the Slack
+webhook's status updates) all commit correctly with no errors, and a
 decision's full lifecycle — create, read back, update status, see the
 update reflected — works end to end.
 """
@@ -32,13 +35,13 @@ def _make_record(text: str) -> DecisionRecord:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_creates_and_updates_do_not_lock():
+async def test_concurrent_creates_and_updates_all_commit():
     records = [_make_record(f"concurrent decision {i}") for i in range(8)]
 
     # Fire several create() calls at once, then several update_status()
     # calls at once — this is exactly the shape of real contention
-    # (decision creation vs. the Slack webhook's status updates) WAL
-    # mode exists to make safe.
+    # (decision creation vs. the Slack webhook's status updates)
+    # Postgres handles natively via MVCC, no special setup needed.
     await asyncio.gather(*(decision_store.create(r) for r in records))
 
     await asyncio.gather(
@@ -63,8 +66,9 @@ async def test_decision_lifecycle_create_read_update():
     assert stored is not None
     assert stored.status == "pending"
     assert stored.decision_text == record.decision_text
-    # SQLite has no native tz-aware storage — confirm it's reattached
-    # on the way back out rather than silently going naive.
+    # The timestamp column is a plain (non-timezone) DateTime, which
+    # strips tzinfo on the way back out regardless of backend — confirm
+    # it's reattached rather than silently going naive.
     assert stored.timestamp.tzinfo is not None
 
     await decision_store.update_status(record.id, "approved", "U_APPROVER")

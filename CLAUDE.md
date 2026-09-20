@@ -8,7 +8,7 @@ Built for a 48-hour hackathon. Optimize for a working, rehearsed demo over compl
 
 - **Platform:** Google Meet only. No Zoom, no Teams.
 - **Notifications:** Slack DMs only. No Chrome desktop alerts.
-- **ASR:** AWS Transcribe Streaming is primary. Deepgram is the fallback — same downstream shape, just a different provider, swappable if Transcribe setup breaks.
+- **ASR:** AWS Transcribe Streaming — sole provider, no fallback.
 - **Demo strategy:** Text-injection (pre-scripted fake transcripts via `/ws/demo`) is the primary demo path. Live audio through a real Meet call is a bonus secondary path — if it's flaky, fall back to text-injection without hesitation.
 - **Confidence threshold:** Hardcoded at `0.7`. No user-facing "trust dial" slider in v1.
 - **Audio processing:** `ScriptProcessorNode`, not `AudioWorklet` — simpler for the timeline, fine for a demo.
@@ -23,7 +23,7 @@ Ghost does not dial into a meeting unattended. "Can't attend" means a muted brow
 
 - **No echo/feedback:** processed audio must route to a silent sink, never `audioContext.destination`.
 - **Debounce before notifying:** hold the first detected decision for a 10–15s coalescing window; batch anything else that lands in it into one Slack DM, not one per detection.
-- **Drafted answer required:** before sending the Slack DM, query past decisions (OpenSearch, or SQLite early on) for relevant context and draft a suggested answer via a second LLM call. This is the core differentiator — don't ship a plain notifier.
+- **Drafted answer required:** before sending the Slack DM, query past decisions (OpenSearch, or Postgres early on) for relevant context and draft a suggested answer via a second LLM call. This is the core differentiator — don't ship a plain notifier.
 - **Cedar policy check gates every notification.** "Deny" means log the decision, send nothing.
 - **Stop condition:** manual "Stop Ghost" control in the side panel, plus detecting the Meet tab closing.
 - **Consent indicator:** a persistent "Ghost is listening" element in the side panel whenever capture is active.
@@ -59,11 +59,11 @@ ghost/
 | Extension | Chrome Manifest V3, tabCapture, offscreen, sidePanel |
 | Audio processing | ScriptProcessorNode, 16kHz, 16-bit PCM |
 | Backend | FastAPI, WebSockets, Uvicorn |
-| ASR | AWS Transcribe Streaming (Deepgram fallback) |
+| ASR | AWS Transcribe Streaming — sole provider, no fallback |
 | LLM | Strands Agent (or Claude 3 Haiku for latency) |
 | Policy | Cedar (cedarpy) |
 | Notifications | Slack SDK (Block Kit, interactive buttons) |
-| Database | SQLite + SQLAlchemy (async) — build first, P0 |
+| Database | PostgreSQL (async, via asyncpg) — build first, P0 |
 | Search | OpenSearch — add after core loop works, P1 |
 | Deployment | Local + ngrok for the Slack webhook |
 
@@ -76,7 +76,7 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 2. Streaming relay + ASR (backend side)
 3. Decision detection (LLM, two-tier trigger, debounce)
 4. Cedar policy + Slack (incl. drafted answer)
-5. Database + OpenSearch (SQLite first, OpenSearch second)
+5. Database + OpenSearch (Postgres first, OpenSearch second)
 6. Side panel UI (listening state, triggered/answered state, search — search is P2, cut first if short on time)
 7. Demo rehearsal — run this in a clean context, full end-to-end, twice in a row
 
@@ -107,11 +107,13 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 
 **Phase 2 (backend streaming relay + ASR):**
 
-- **TranscriptEvent shape** (`backend/asr_base.py`), identical from both providers: `text: str`,
-  `speaker: str` (`"spk_N"` from provider diarization, or `"unknown"`; name inference from
+- **TranscriptEvent shape** (`backend/asr_base.py`): `text: str`,
+  `speaker: str` (`"spk_N"` from Transcribe's diarization, or `"unknown"`; name inference from
   self-intros is not done here — that's Phase 3's job), `timestamp: datetime` (wall-clock UTC at
   the moment the event was finalized, not audio-relative seconds), `confidence: float`,
-  `is_partial: bool`, `meeting_id: str`.
+  `is_partial: bool`, `meeting_id: str`. Still its own `ASRProvider` interface (not collapsed into
+  `AWSTranscribeProvider`) even though AWS Transcribe is the only implementation, so a provider
+  is still mockable for tests.
 - **What reaches the client:** only final (`is_partial=False`) events, sent over `/ws/transcribe`
   as JSON via `websocket.send_json(event.model_dump(mode="json"))`. Partials are produced
   internally but dropped before the WebSocket — Phase 3 only ever sees finals.
@@ -122,14 +124,15 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 - **`/ws/demo`:** streams `backend/fixtures/demo_transcript.json` verbatim as TranscriptEvents,
   one every 2s, `meeting_id="demo-meeting"`, `is_partial` always `False`. Edit that JSON file to
   change the scripted demo, not the endpoint code.
-- **ASR_PROVIDER fallback:** `aws` (default) automatically falls back to Deepgram if
-  `AWSTranscribeProvider.start()` raises; `deepgram` uses Deepgram directly with no fallback.
-  Both require real credentials to actually produce transcripts — without them `get_asr_provider`
-  raises and `/ws/transcribe` closes with code 1011 after announcing the session id.
+- **ASR provider:** `get_asr_provider()` constructs and starts `AWSTranscribeProvider` directly and
+  unconditionally — no provider switch, no fallback (Deepgram was removed; see the migration note
+  under Phase 6). Real AWS credentials are required to actually produce transcripts — without them
+  `get_asr_provider` raises and `/ws/transcribe` closes with code 1011 after announcing the
+  session id.
 - **Logging:** every log line for a `/ws/transcribe` or `/ws/demo` connection goes through
   `MeetingLoggerAdapter` (`backend/asr_base.py`), which prefixes `[meeting_session_id=...]` to the
   message text — not a `%(meeting_session_id)s` field in the global formatter, which would
-  `KeyError` on any other logger (uvicorn's, the AWS/Deepgram SDKs') that doesn't carry it.
+  `KeyError` on any other logger (uvicorn's, the AWS Transcribe SDK's) that doesn't carry it.
 
 **Phase 3 (decision detection):**
 
@@ -230,60 +233,72 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   `chat:write`/`im:write` — `slack_notifier.py` resolves an email `slack_target` via
   `users.lookupByEmail` before DMing.
 
-**Phase 5 (SQLite persistence + OpenSearch search):**
+**Phase 5 (persistence + OpenSearch search) — originally built on SQLite, migrated to PostgreSQL;
+see the migration note after Phase 6 for the swap itself:**
 
 - **`decision_store.DecisionStore` interface is unchanged** — `get_recent`/`create`/`update_status`
-  keep their exact Phase 4 signatures. `SQLiteDecisionStore` (backed by `database.py`'s async
-  SQLAlchemy setup) replaced `JSONLDecisionStore`; nothing upstream (`decision_detector.py`,
+  keep their exact Phase 4 signatures. `PostgresDecisionStore` (backed by `database.py`'s async
+  SQLAlchemy/asyncpg setup) replaced `JSONLDecisionStore`; nothing upstream (`decision_detector.py`,
   `notification_pipeline.py`, `answer_drafter.py`, `slack_webhook.py`) needed to change.
 - **Schema creation happens in `main.py`'s `lifespan` handler**, not at module import —
-  `async with engine.begin()` needs a running event loop. No Alembic/migrations.
-- **WAL journal mode is set via a SQLAlchemy `"connect"` event on `engine.sync_engine`**
-  (`database.py`), which fires per DBAPI connection — this is what makes concurrent
-  `create()`/`update_status()` calls (decision creation vs. the Slack webhook's status updates)
-  safe without "database is locked" errors. Confirmed empirically: `PRAGMA journal_mode` reads
-  back `wal` after connecting.
-- **SQLite has no native tz-aware datetime storage** — a `datetime.now(timezone.utc)` value comes
-  back from SQLAlchemy with `tzinfo=None`. `decision_store._row_to_record` reattaches
-  `timezone.utc` on every read, since every timestamp written here was already UTC and
-  `DecisionRecord`'s contract elsewhere assumes tz-aware. Don't remove this — a naive datetime
-  slipping into code that compares it against a tz-aware one raises `TypeError`.
-- **Tests use an isolated DB file**, not the real dev `ghost.db`: `database.DATABASE_URL` reads
-  `GHOST_DATABASE_URL` if set, and `tests/conftest.py` sets it to `test_ghost.db` before any test
-  module imports `database.py` (conftest.py is collected first). The same fixture also creates the
-  schema directly — `TestClient(app)` used without an explicit `with` block never fires the FastAPI
-  lifespan, so nothing else would create it for tests. Confirmed a fresh async engine handles
-  being used across pytest-asyncio's function-scoped event loops without cross-loop connection
-  errors — didn't need `NullPool`.
+  `async with engine.begin()` needs a running event loop. No Alembic/migrations —
+  `create_all()` only creates tables/types that don't exist yet, so a schema change means dropping
+  and recreating the dev database, not migrating it in place.
+- **Postgres handles concurrent `create()`/`update_status()` calls** (decision creation vs. the
+  Slack webhook's status updates) natively via MVCC — no journal-mode workaround needed.
+- **A plain (non-timezone) DateTime column strips tzinfo on the way back out**, regardless of
+  backend — a `datetime.now(timezone.utc)` value written comes back with `tzinfo=None`.
+  `decision_store._row_to_record` reattaches `timezone.utc` on every read, since every timestamp
+  written here was already UTC and `DecisionRecord`'s contract elsewhere assumes tz-aware. Don't
+  remove this — a naive datetime slipping into code that compares it against a tz-aware one raises
+  `TypeError`. asyncpg is stricter than aiosqlite was on the write side, though: it rejects a
+  tz-aware datetime outright against this column type instead of silently dropping the tzinfo, so
+  `PostgresDecisionStore.create()` strips it explicitly (`.replace(tzinfo=None)`) before the insert.
+- **Tests use an isolated database**, not the real dev `ghost` database: `config.Settings.database_url`
+  reads `DATABASE_URL`, and `tests/conftest.py` sets it to a separate `ghost_test` database (same
+  Postgres server, same `ghost` credentials) before any test module imports `config.py`/`database.py`
+  (conftest.py is collected first). The same fixture drops and recreates the schema directly —
+  `TestClient(app)` used without an explicit `with` block never fires the FastAPI lifespan, so
+  nothing else would create it for tests. **`database.engine` uses `NullPool`** — asyncpg binds a
+  pooled connection to the event loop that created it, and reusing one from a different loop raises
+  "attached to a different loop"; that never came up under aiosqlite, but does here since
+  conftest.py's session-scoped schema setup and pytest-asyncio's function-scoped per-test loops are
+  different loops sharing this one module-level engine. Don't remove `NullPool` without
+  re-verifying the full suite against real Postgres, not just SQLite-era assumptions.
 - **`opensearch_client.py` is fully optional at every layer:** `_client` is `None` whenever
   `OPENSEARCH_HOST` is unset, and every function treats that as "not part of this deployment," not
   an error. `ensure_index()`/`index_decision()` never raise; `search_decisions()` is the one
   function allowed to raise (unconfigured or unreachable), specifically so `main.py`'s `/search`
-  route can catch it and fall back to SQLite — the raising is deliberate, not a bug.
+  route can catch it and fall back to Postgres — the raising is deliberate, not a bug.
 - **`opensearch_client.index_decision(decision, approved_by=None)` takes `approved_by` as a
   separate parameter**, not part of `DecisionRecord` — the record intentionally has no field for it
   (Phase 4). Without this, `approved_by` could never become searchable despite
-  `search_decisions`'s `multi_match` querying it. `SQLiteDecisionStore.update_status` passes it
+  `search_decisions`'s `multi_match` querying it. `PostgresDecisionStore.update_status` passes it
   through after building a fresh record from the just-updated row.
-- **`GET /search?q=`**: tries OpenSearch first, falls back to a SQLite `LIKE '%q%'` scan across
+- **`GET /search?q=`**: tries OpenSearch first, falls back to a Postgres `LIKE '%q%'` scan across
   `decision_text`/`approved_by`/`speaker` on any exception (unconfigured, unreachable, or a query
   error) — never hard-fails just because OpenSearch is down. Uses `Depends(database.get_session)`
-  for its direct DB access, per the Depends-for-routes convention; `SQLiteDecisionStore` itself
-  isn't a route, so it opens its own sessions via `database.async_session_maker()` directly.
+  for its direct DB access, per the Depends-for-routes convention; `PostgresDecisionStore` itself
+  isn't a route, so it opens its own sessions via `database.async_session_maker()` directly. Its
+  response still labels this path `"sqlite_fallback"` — a naming leftover from before the Postgres
+  migration, kept as-is deliberately since `tests/test_search_endpoint.py` asserts on that exact
+  string and the migration's test harness explicitly re-ran Phase 5's tests unmodified.
 - **`aiohttp` pinned explicitly** in `requirements.txt` — `opensearch-py`'s declared dependencies
   are only `certifi`/`Events`/`python-dateutil`/`requests`/`urllib3`; `AsyncOpenSearch`'s transport
-  needs `aiohttp` but opensearch-py doesn't declare it, so it was present only transitively via
-  `deepgram-sdk`'s own pin. Pinning it directly means it can't silently disappear.
+  needs `aiohttp` but opensearch-py doesn't declare it as a hard dependency, so it's pinned
+  explicitly here so it doesn't silently disappear.
 - **`docker-compose.yml`** (repo root) is the only place Docker is used in this project, per
   CLAUDE.md scope — a single-node OpenSearch with `plugins.security.disabled=true` for local-dev
   simplicity (no TLS/auth setup needed; matches `OPENSEARCH_HOST=http://localhost:9200` with no
-  user/password). **Not verified against a real running OpenSearch in this sandbox** — Docker's
-  daemon needs privileges this environment doesn't grant, and image pulls from Docker Hub's CDN
-  are blocked by this session's egress policy (403, not a transient failure — did not retry or
-  route around it, per the agent proxy's own instructions). `opensearch_client.py`'s logic is
-  covered by tests against a fake client instead (`tests/test_opensearch_client.py`); the
-  fallback path is proven for real by pointing a genuine `AsyncOpenSearch` at an unreachable port
-  (`tests/test_search_endpoint.py`) rather than mocked, since that needs no Docker at all. That
+  user/password), alongside the `postgres` service added by the Postgres migration (see the
+  migration note after Phase 6). **OpenSearch itself is still not verified against a real running
+  instance in this sandbox** — Docker's daemon needs privileges this environment doesn't grant, and
+  image pulls from Docker Hub's CDN are blocked by this session's egress policy (403, not a
+  transient failure — did not retry or route around it, per the agent proxy's own instructions).
+  `opensearch_client.py`'s logic is covered by tests against a fake client instead
+  (`tests/test_opensearch_client.py`); the fallback path is proven for real by pointing a genuine
+  `AsyncOpenSearch` at an unreachable port (`tests/test_search_endpoint.py`) rather than mocked,
+  since that needs no Docker at all. That
   file's `test_search_uses_opensearch_when_available` is a real, non-mocked integration check
   against `docker-compose`'s OpenSearch — it skips itself when unreachable rather than failing the
   suite, so it'll actually run and verify the real thing for anyone with Docker available.
@@ -375,6 +390,52 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   network call. Note `main.py`'s `/search` route doesn't actually filter by `meeting_id` (Phase 5
   didn't add that parameter, and this phase doesn't touch backend search logic) — the panel sends
   it per spec, but search results may span meetings until a later phase adds real filtering.
+
+**Migration (Deepgram removed, SQLite migrated to PostgreSQL) — after Phase 6:**
+
+- **Deepgram is gone entirely, not just de-emphasized.** `DeepgramProvider`, its config
+  (`DEEPGRAM_API_KEY`, `ASR_PROVIDER`), and the fallback-on-AWS-failure logic are all deleted, not
+  commented out. `transcribe_handler.get_asr_provider()` constructs and starts
+  `AWSTranscribeProvider` directly and unconditionally; a failure to start now propagates straight
+  to the caller (`main.py`'s `ws_transcribe`, which still closes the socket with code 1011 on any
+  `get_asr_provider` exception — that catch-all was never Deepgram-specific). The `ASRProvider`
+  abstract interface itself (`asr_base.py`) stays, on purpose, so a provider is still mockable for
+  tests even with only one real implementation.
+- **Postgres is the sole database, no SQLite anywhere** — `config.Settings.database_url` is
+  required with no default (a missing value fails loudly at startup, same principle as every other
+  required credential in that file), read from `DATABASE_URL`. Local dev value:
+  `postgresql+asyncpg://ghost:ghost@localhost:5432/ghost`, matching `docker-compose.yml`'s new
+  `postgres` service (`postgres:16`, a named volume so data survives a container restart).
+- **`database.Decision.id` is a native Postgres `UUID` column** (`sqlalchemy.dialects.postgresql.UUID(as_uuid=True)`),
+  not a string — `PostgresDecisionStore` passes `decision.id`/`decision_id` straight through as
+  `uuid.UUID` objects everywhere, no `str()`/`uuid.UUID()` conversion at either end anymore.
+- **`database.Decision.status` is a native Postgres `ENUM`** (`sqlalchemy.dialects.postgresql.ENUM`,
+  named `decision_status`), covering exactly `pending`/`approved`/`rejected`/`denied_by_policy`/
+  `answered_live` — the same five values already in use everywhere else. Writing anything outside
+  that set is now a database-level error at write time, verified directly against a real Postgres
+  instance (a raw `INSERT ... status = 'bogus_status'` raises `invalid input value for enum
+  decision_status`).
+- **asyncpg needs `NullPool` on the async engine** — see the `NullPool` bullet under Phase 5 above;
+  this is the one genuinely new gotcha the migration surfaced, not just a driver swap.
+- **asyncpg is strict about tz-aware datetimes against a non-timezone column** — see the tz-aware
+  bullet under Phase 5 above; `PostgresDecisionStore.create()` strips tzinfo explicitly before
+  insert, which aiosqlite never required.
+- **Old SQLite data was NOT migrated** — `ghost.db`/`test_ghost.db` (Phase 5-era, gitignored) held
+  only development/test data. Postgres starts empty; this was the intended behavior for a
+  hackathon-scope migration, not an oversight, and no data-migration script was written.
+- **Unlike OpenSearch, Postgres genuinely runs in this sandbox** (`postgresql-16` was already
+  installed at the OS level here, unrelated to Docker) — `tests/test_postgres_connectivity.py` and
+  every test in `test_database.py` ran against a real local Postgres instance (databases `ghost`
+  and `ghost_test`, both owned by a `ghost` role with password `ghost`), not a fake/mocked one.
+  This is a stronger verification story than Phase 5's original SQLite-to-OpenSearch migration had,
+  where Docker/OpenSearch couldn't be verified for real in-sandbox at all.
+- **`main.py`'s `/search` route and its `"sqlite_fallback"` response label were deliberately left
+  untouched** — the migration's own test harness re-ran Phase 5's tests (including
+  `test_search_endpoint.py`, which asserts on that exact string) unmodified, so renaming it would
+  have contradicted that requirement. The label is now a harmless historical misnomer, not a bug.
+- **Every other test suite (Phase 3, 4, 5, 6) re-ran unmodified against Postgres and all pass** —
+  this is the actual proof the store-interface swap didn't break anything upstream, same principle
+  Phase 5's original SQLite migration used.
 
 ## Conventions
 

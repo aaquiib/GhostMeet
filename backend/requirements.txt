@@ -8,9 +8,8 @@ amazon-transcribe==0.6.2
 slack-sdk==3.33.1
 cedarpy==4.12.0
 sqlalchemy[asyncio]==2.0.35
-aiosqlite==0.20.0
+asyncpg==0.29.0
 opensearch-py==2.7.1
-deepgram-sdk==3.7.0
 anthropic==1.6.0
 pydantic-settings==2.5.2
 pytest==8.3.3
@@ -26,7 +25,6 @@ httpx==0.27.2
 python-multipart==0.0.20
 # opensearch_client.py uses AsyncOpenSearch, whose aiohttp-based
 # transport opensearch-py doesn't declare as a hard dependency (only
-# `certifi`, `Events`, `python-dateutil`, `requests`, `urllib3` are).
-# Was present only transitively via deepgram-sdk — pinned explicitly
-# so it doesn't silently disappear if that pin ever changes.
+# `certifi`, `Events`, `python-dateutil`, `requests`, `urllib3` are) —
+# pinned explicitly so it doesn't silently disappear.
 aiohttp==3.14.3

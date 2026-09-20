@@ -14,11 +14,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Postgres is required (the sole database — no SQLite fallback):
+
+```bash
+docker compose up -d postgres   # repo root — brings up postgres:16 with user/password/db "ghost"
+```
+
 Copy the env template and fill in real credentials:
 
 ```bash
 cp ../.env.example .env
-# then edit backend/.env
+# then edit backend/.env — DATABASE_URL defaults to the docker-compose postgres service above;
+# change it if you're pointing at a different Postgres instance
 ```
 
 Run the backend:
@@ -121,10 +128,10 @@ asyncio.run(main())
 
 You should see one JSON transcript event roughly every 2 seconds.
 
-`/ws/transcribe` is the real path and needs working AWS Transcribe (or Deepgram) credentials in
-`backend/.env` — without them the connection announces a session id and then closes (the AWS
-call fails, it falls back to Deepgram, that fails too, and the socket closes with code 1011;
-watch the server log for the fallback warning). To test it without a live Google Meet call:
+`/ws/transcribe` is the real path and needs working AWS Transcribe credentials in `backend/.env`
+— without them the connection announces a session id and then closes (the AWS call fails and the
+socket closes with code 1011; watch the server log for the failure). AWS Transcribe Streaming is
+the sole ASR provider — there is no fallback. To test it without a live Google Meet call:
 
 ```bash
 python3 scripts/feed_wav_file.py                          # uses the bundled sample WAV
@@ -156,12 +163,12 @@ must be called with the names to watch for, or Tier 1 never matches anything. As
 is driven by the `session_init` handshake below, for both `/ws/demo` and real `/ws/transcribe`
 sessions.
 
-With `ASR_PROVIDER` and `LLM_API_KEY` both pointing at real, working credentials, running
-`scripts/feed_wav_file.py` against a real two-person recording exercises the full path — audio →
-transcript → decision detection — and any detected batch gets logged to the server console and
-persisted to SQLite (`backend/ghost.db`, gitignored — see Phase 5 below). A wrong/missing
-`LLM_API_KEY` fails gracefully: Tier 2 logs the failure and the window is treated as "not a
-decision" rather than crashing the session.
+With real AWS Transcribe credentials and `LLM_API_KEY` both pointing at working credentials,
+running `scripts/feed_wav_file.py` against a real two-person recording exercises the full path —
+audio → transcript → decision detection — and any detected batch gets logged to the server console
+and persisted to Postgres (see Phase 5 below). A wrong/missing `LLM_API_KEY` fails gracefully:
+Tier 2 logs the failure and the window is treated as "not a decision" rather than crashing the
+session.
 
 ## Session identity + Cedar/Slack notification (Phase 4)
 
@@ -205,28 +212,35 @@ a real deny — edit it to add more rules; `cedar_policy.check_decision_policy` 
 parse/evaluation error, so a broken policy file blocks notifications rather than allowing them
 through.
 
-## Persistence + search (Phase 5)
+## Persistence + search (Phase 5, migrated from SQLite to PostgreSQL)
 
-Decisions persist in SQLite (`backend/ghost.db`, gitignored — schema created automatically on
-startup, WAL journal mode so concurrent writes from decision creation and the Slack webhook don't
-lock each other out). `backend/decision_store.py`'s `DecisionStore` interface is unchanged from
-Phase 4 — `SQLiteDecisionStore` just replaced the interim `JSONLDecisionStore`.
+Decisions persist in Postgres (schema created automatically on startup; Postgres handles
+concurrent writes from decision creation and the Slack webhook natively, no special setup needed).
+`backend/decision_store.py`'s `DecisionStore` interface is unchanged from Phase 4 —
+`PostgresDecisionStore` (originally `SQLiteDecisionStore`, migrated — see CLAUDE.md's migration
+note) just replaced the interim `JSONLDecisionStore`. `id` is a native Postgres `UUID` column and
+`status` a native `ENUM` covering exactly `pending`/`approved`/`rejected`/`denied_by_policy`/
+`answered_live` — writing any other status value is a database-level error.
 
 ```bash
+docker compose up -d postgres             # repo root — must be running before the tests below
 cd backend && source .venv/bin/activate
-pytest tests/test_database.py -v          # concurrency + lifecycle, no credentials needed
+pytest tests/test_postgres_connectivity.py -v   # connectivity smoke test — run this first
+pytest tests/test_database.py -v                # concurrency + lifecycle
 ```
 
-OpenSearch is optional and additive — SQLite stays the source of truth either way. For local dev:
+OpenSearch is optional and additive — Postgres stays the source of truth either way. For local dev:
 
 ```bash
-docker compose up -d       # repo root — the only place this project uses Docker
+docker compose up -d       # repo root — brings up both postgres and opensearch
 ```
 
 Then set `OPENSEARCH_HOST=http://localhost:9200` in `backend/.env` (leave `OPENSEARCH_USER`/
 `OPENSEARCH_PASSWORD` blank — the compose file disables the security plugin for local-dev
-simplicity). With it unset or unreachable, `GET /search?q=` transparently falls back to a SQLite
-`LIKE` query — nothing hard-fails.
+simplicity). With it unset or unreachable, `GET /search?q=` transparently falls back to a Postgres
+`LIKE` query — nothing hard-fails. (Its JSON response still labels this `"source": "sqlite_fallback"`,
+a naming leftover from before the Postgres migration — see CLAUDE.md's migration note for why
+that's left as-is.)
 
 ```bash
 curl "http://localhost:8000/search?q=ship%20date"

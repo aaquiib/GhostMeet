@@ -1,9 +1,27 @@
-# Single-node local OpenSearch for development (Phase 5, P1). The
-# only place Docker is used in this project — everything else runs
-# directly (see README). Security plugin disabled for local-dev
-# simplicity: no TLS/auth needed, matching OPENSEARCH_HOST=http://localhost:9200
-# with no user/password in .env.
+# Local dev services. Postgres (Phase 5 migration, P0 — the primary
+# datastore) and OpenSearch (Phase 5, P1 — optional search index) both
+# run here; everything else runs directly (see README). Security
+# plugin disabled on OpenSearch for local-dev simplicity: no TLS/auth
+# needed, matching OPENSEARCH_HOST=http://localhost:9200 with no
+# user/password in .env.
 services:
+  postgres:
+    image: postgres:16
+    container_name: ghost-postgres
+    environment:
+      - POSTGRES_USER=ghost
+      - POSTGRES_PASSWORD=ghost
+      - POSTGRES_DB=ghost
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ghost -d ghost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   opensearch:
     image: opensearchproject/opensearch:2.15.0
     container_name: ghost-opensearch
@@ -24,4 +42,5 @@ services:
       retries: 10
 
 volumes:
+  postgres-data:
   opensearch-data:

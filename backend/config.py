@@ -6,8 +6,6 @@ makes a missing required credential fail loudly at startup instead of
 surfacing as a confusing error deep in some phase-4 code path.
 """
 
-from typing import Literal
-
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,7 +18,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # AWS — required. Transcribe Streaming is the primary ASR path.
+    # AWS — required. Transcribe Streaming is the sole ASR path, no
+    # fallback provider.
     aws_region: str
     aws_access_key_id: str
     aws_secret_access_key: str
@@ -32,11 +31,14 @@ class Settings(BaseSettings):
     # LLM — required. Powers decision detection and drafted answers.
     llm_api_key: str
 
-    # Deepgram — optional. Only used if AWS Transcribe setup breaks.
-    deepgram_api_key: str | None = None
+    # Postgres — required, no default. A missing/unset value must fail
+    # loudly at startup rather than silently pointing at some other
+    # database. Local dev: postgresql+asyncpg://ghost:ghost@localhost:5432/ghost
+    # (matches docker-compose.yml's postgres service).
+    database_url: str
 
-    # OpenSearch — optional. Not needed until phase 5 (P1); SQLite covers
-    # decision history before that.
+    # OpenSearch — optional. Not needed until phase 5 (P1); Postgres
+    # covers decision history before that.
     opensearch_host: str | None = None
     opensearch_user: str | None = None
     opensearch_password: str | None = None
@@ -51,12 +53,6 @@ class Settings(BaseSettings):
     # capture pipeline (Phase 1), not meant to vary per deployment.
     SAMPLE_RATE_HZ: int = 16000
     AUDIO_ENCODING: str = "pcm"
-
-    # Which ASR provider is primary. AWS Transcribe Streaming is the
-    # default; Deepgram is the fallback (used directly if set to
-    # "deepgram", or automatically if AWS fails to start). Swapping
-    # providers is a config change, not a code change.
-    asr_provider: Literal["aws", "deepgram"] = "aws"
 
 
 settings = Settings()

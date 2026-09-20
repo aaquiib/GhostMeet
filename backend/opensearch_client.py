@@ -3,10 +3,11 @@ Owns the OpenSearch integration for decision search: index setup with
 an explicit mapping (never relying on auto-inferred field types),
 indexing/updating a decision document, and the multi_match search
 query. Every call here is best-effort from the caller's point of
-view — index_decision never raises (SQLiteDecisionStore calls it
+view — index_decision never raises (PostgresDecisionStore calls it
 after every write and must not fail decision creation/status updates
 if OpenSearch is down), while search_decisions is allowed to raise so
-main.py's /search endpoint can catch it and fall back to SQLite.
+main.py's /search endpoint can catch it and fall back to a Postgres
+LIKE query.
 """
 
 import logging
@@ -91,11 +92,11 @@ def _document(decision: DecisionRecord, approved_by: str | None) -> dict:
 async def index_decision(decision: DecisionRecord, approved_by: str | None = None) -> None:
     """Indexes or updates (same doc id -> upsert) a decision. Takes
     approved_by separately since DecisionRecord itself has no field for
-    it (Phase 4's SQLiteDecisionStore.update_status gets it as a
+    it (Phase 4's decision store update_status gets it as a
     parameter, not on the record) — without this, approved_by could
     never actually become searchable despite search_decisions querying
     it. Never raises: an indexing failure must not break decision
-    creation or a status update succeeding in SQLite."""
+    creation or a status update succeeding in Postgres."""
     if _client is None:
         return
     try:
@@ -111,7 +112,7 @@ async def index_decision(decision: DecisionRecord, approved_by: str | None = Non
 async def search_decisions(query: str) -> list[dict]:
     """multi_match across decision_text, approved_by, speaker. Raises
     if OpenSearch isn't configured or the call fails — main.py's
-    /search route is what catches this and falls back to SQLite, so
+    /search route is what catches this and falls back to Postgres, so
     this function doesn't swallow errors itself."""
     if _client is None:
         raise RuntimeError("OpenSearch is not configured (OPENSEARCH_HOST unset)")
