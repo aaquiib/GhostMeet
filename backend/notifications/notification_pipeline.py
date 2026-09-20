@@ -12,11 +12,11 @@ import asyncio
 import logging
 
 import session_connections
-from answer_drafter import draft_answer
-from cedar_policy import check_decision_policy, classify_decision_type
 from decision_detector import DecisionRecord, decision_pipeline
 from decision_store import DecisionStore
-from slack_notifier import send_batch_notification
+from notifications.answer_drafter import draft_answer
+from notifications.cedar_policy import check_decision_policy, classify_decision_type
+from notifications.slack_notifier import send_batch_notification
 
 logger = logging.getLogger("ghost.notify")
 

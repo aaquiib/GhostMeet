@@ -3,6 +3,10 @@ Owns the streaming ASR connection: AWSTranscribeProvider, the sole
 ASRProvider implementation (asr_base.py) — AWS Transcribe Streaming is
 the only supported ASR path, no fallback provider. get_asr_provider()
 is the single entry point main.py uses to start it.
+
+Everything AWS-specific in this project lives behind this module: the
+`amazon_transcribe` SDK is imported here and nowhere else, and its
+types are translated into TranscriptEvent before anything leaves.
 """
 
 import logging
@@ -13,10 +17,23 @@ from amazon_transcribe.auth import StaticCredentialResolver
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.model import Result as AwsResult
 
-from asr_base import ASRProvider, MeetingLoggerAdapter, TranscriptEvent
+from transcription.asr_base import ASRProvider, MeetingLoggerAdapter, TranscriptEvent
 from config import settings
 
 logger = logging.getLogger("ghost.asr")
+
+
+def _normalize_speaker_label(raw: "str | None") -> str:
+    """Transcribe's *streaming* API labels speakers `"0"`, `"1"`, while
+    its batch API — and the demo fixture, the side panel's
+    speaker-override input, and this project's docs — all use
+    `"spk_0"`/`"spk_1"`. Normalizing at the provider edge is what makes
+    an override typed as `spk_0` actually match a live session's
+    events; without it, overrides silently do nothing in real meetings
+    while appearing to work in the demo."""
+    if not raw:
+        return "unknown"
+    return f"spk_{raw}" if raw.isdigit() else raw
 
 
 def _aws_result_to_event(result: AwsResult, meeting_id: str) -> TranscriptEvent:
@@ -26,7 +43,7 @@ def _aws_result_to_event(result: AwsResult, meeting_id: str) -> TranscriptEvent:
 
     # One result is one speaker turn under Transcribe's diarization, so
     # the first labeled item represents the whole result.
-    speaker = next((item.speaker for item in items if item.speaker), "unknown")
+    speaker = _normalize_speaker_label(next((item.speaker for item in items if item.speaker), None))
 
     confidences = [
         item.confidence

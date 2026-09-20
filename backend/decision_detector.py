@@ -33,7 +33,7 @@ from typing import Awaitable, Callable, Iterable, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from asr_base import TranscriptEvent
+from transcription import TranscriptEvent
 from config import settings
 from groq_llm import GROQ_MODEL, GroqMessagesClient
 
@@ -215,16 +215,38 @@ _DEDUP_LEDGER_SIZE = 10
 _DEDUP_OVERLAP_THRESHOLD = 0.6
 
 
-def _is_duplicate(candidate_text: str, recent_texts: Iterable[str]) -> bool:
-    candidate_words = set(re.findall(r"\w+", candidate_text.lower()))
-    if not candidate_words:
-        return False
-    for prior_text in recent_texts:
-        prior_words = set(re.findall(r"\w+", prior_text.lower()))
-        if not prior_words:
-            continue
-        overlap = len(candidate_words & prior_words) / len(candidate_words | prior_words)
-        if overlap >= _DEDUP_OVERLAP_THRESHOLD:
+def _word_overlap(a: str, b: str) -> float:
+    words_a = set(re.findall(r"\w+", a.lower()))
+    words_b = set(re.findall(r"\w+", b.lower()))
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _is_duplicate(
+    candidate: "tuple[str, str]", recent: "Iterable[tuple[str, str]]"
+) -> bool:
+    """candidate/recent entries are (decision_text, mention_quote) pairs.
+    Checking decision_text alone missed real duplicates in practice:
+    the same literal utterance can get classified twice (window
+    carry-forward, or the sticky-window extension above, both
+    deliberately re-expose recent text to Tier 2) and each LLM call
+    writes its own one-sentence decision_text summary independently —
+    phrased differently enough between calls that word-overlap can
+    fall under threshold even though it's the same real request.
+    mention_quote is copied verbatim from the transcript by
+    instruction (_SYSTEM_PROMPT), so it stays far more stable across
+    repeat classifications of the same sentence — confirmed against a
+    real duplicate pair from a live session where decision_text
+    overlap was 0.53 (missed) but mention_quote overlap was 0.92
+    (caught). Checked in addition to, not instead of, decision_text —
+    catches a duplicate if either field matches, which only ever
+    widens what's caught."""
+    candidate_decision_text, candidate_quote = candidate
+    for prior_decision_text, prior_quote in recent:
+        if _word_overlap(candidate_decision_text, prior_decision_text) >= _DEDUP_OVERLAP_THRESHOLD:
+            return True
+        if _word_overlap(candidate_quote, prior_quote) >= _DEDUP_OVERLAP_THRESHOLD:
             return True
     return False
 
@@ -274,6 +296,26 @@ _WINDOW_SECONDS = 30
 _MAX_WINDOW_SEGMENTS = 10
 _CARRY_FORWARD_LINES = 3
 
+# A real conversation names someone once, then keeps addressing them
+# with "you"/"your" for the rest of the thread — the literal name never
+# reappears. With only _CARRY_FORWARD_LINES of text preserved across a
+# window boundary, that follow-up (often the actual request — "can you
+# review the API", "send us the link") falls out of the carried text
+# and Tier 1 never re-matches, so it's silently dropped before Tier 2
+# ever sees it: it isn't stored, isn't logged, and never has a chance
+# to be denied — it simply never enters the pipeline. Confirmed by
+# replaying a real transcript where "review the API"/"send the
+# dashboard link" — both directed at a person named earlier — never
+# triggered classification for exactly this reason.
+#
+# _NAME_MENTION_STICKY_SECONDS keeps Tier 1 open for one further window
+# after a real name match, so the window immediately following a
+# mention is still eligible for Tier 2 even with no literal re-mention.
+# Time-based (not "one more window" as a counter) so it decays on its
+# own without extra state to reset; set to 2x the window length so
+# exactly one full follow-up window is covered, not an open-ended tail.
+_NAME_MENTION_STICKY_SECONDS = _WINDOW_SECONDS * 2
+
 
 @dataclass
 class _SessionState:
@@ -282,6 +324,7 @@ class _SessionState:
     window_start: datetime | None = None
     speaker_mapper: SpeakerMapper = field(default_factory=SpeakerMapper)
     watch_names_pattern: re.Pattern | None = None
+    # Each entry is (decision_text, mention_quote) — see _is_duplicate.
     recent_decisions: deque = field(default_factory=lambda: deque(maxlen=_DEDUP_LEDGER_SIZE))
     pending_batch: list = field(default_factory=list)
     batch_timer_task: "asyncio.Task | None" = None
@@ -289,6 +332,10 @@ class _SessionState:
     # from the process-wide Settings object, which would only support
     # one watched user per backend instance.
     slack_target: str | None = None
+    # Timestamp of the last window whose text actually matched
+    # watch_names_pattern — drives the sticky-window Tier 1 extension
+    # above. None until the first real match.
+    last_name_mention_at: datetime | None = None
 
 
 # --- Pipeline --------------------------------------------------------------
@@ -387,10 +434,31 @@ class DecisionPipeline:
             state.buffer = window_events[-_CARRY_FORWARD_LINES:]
             state.window_start = None
 
+        if not state.watch_names_pattern:
+            return
+
         # Tier 1: fast regex check on a local snapshot, outside the
         # lock — pure computation, no need to hold up other events.
         window_text = " ".join(e.text for e in window_events)
-        if not state.watch_names_pattern or not state.watch_names_pattern.search(window_text):
+        name_mentioned_now = bool(state.watch_names_pattern.search(window_text))
+        window_end = window_events[-1].timestamp
+
+        # Sticky extension: also let through the window immediately
+        # following a real match, even with no literal re-mention here
+        # — see _NAME_MENTION_STICKY_SECONDS above for why. Checked
+        # before updating last_name_mention_at below, so a match here
+        # is judged against the *previous* mention, not itself.
+        stale_by = (
+            (window_end - state.last_name_mention_at).total_seconds()
+            if state.last_name_mention_at is not None
+            else None
+        )
+        sticky_hit = stale_by is not None and stale_by <= _NAME_MENTION_STICKY_SECONDS
+
+        if name_mentioned_now:
+            state.last_name_mention_at = window_end
+
+        if not (name_mentioned_now or sticky_hit):
             return
 
         # Tier 2 (the LLM call) can take up to LLM_TIMEOUT_SECONDS to
@@ -509,11 +577,15 @@ class DecisionPipeline:
             return
 
         async with state.lock:
-            if _is_duplicate(record.decision_text, state.recent_decisions):
-                logger.info("[meeting_id=%s] deduped decision: %r", meeting_id, record.decision_text)
+            candidate = (record.decision_text, record.mention_quote)
+            if _is_duplicate(candidate, state.recent_decisions):
+                logger.info(
+                    "[meeting_id=%s] deduped decision: %r (quote=%r)",
+                    meeting_id, record.decision_text, record.mention_quote,
+                )
                 return
 
-            state.recent_decisions.append(record.decision_text)
+            state.recent_decisions.append(candidate)
             state.pending_batch.append(record)
 
             # Fixed window, not resettable: only start the timer if one

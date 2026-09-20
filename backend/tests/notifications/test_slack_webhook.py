@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 import main
 import session_connections
-import slack_webhook
+from notifications import slack_webhook
 from decision_detector import DecisionRecord
 
 client = TestClient(main.app)

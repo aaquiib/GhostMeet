@@ -19,14 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import database
 import opensearch_client
 import session_connections
-from asr_base import MeetingLoggerAdapter
 from config import settings  # noqa: F401  (import triggers validation)
 from decision_detector import decision_pipeline, handle_control_message
 from decision_store import decision_store
-from demo_mode import DEMO_MEETING_ID, run_demo_session
-from notification_pipeline import make_notification_pipeline
-from slack_webhook import router as slack_webhook_router
-from transcribe_handler import get_asr_provider
+from notifications import make_notification_pipeline, slack_webhook_router
+from transcription import MeetingLoggerAdapter
+from transcription.aws_transcribe import get_asr_provider
+from transcription.demo_mode import DEMO_MEETING_ID, run_demo_session
 
 logging.basicConfig(
     level=logging.INFO,

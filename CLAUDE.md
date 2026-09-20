@@ -41,17 +41,51 @@ ghost/
 │   ├── sidepanel.html
 │   └── sidepanel.js
 ├── backend/             # FastAPI server
-│   ├── main.py
-│   ├── transcribe_handler.py
-│   ├── decision_detector.py
-│   ├── cedar_policy.py
-│   ├── slack_notifier.py
-│   ├── slack_webhook.py
-│   ├── opensearch_client.py
+│   ├── main.py                    # composition root — the only module that imports both boundaries
+│   ├── transcription/             # BOUNDARY 1: audio -> TranscriptEvent (AWS)
+│   │   ├── asr_base.py            # ASRProvider contract + TranscriptEvent
+│   │   ├── aws_transcribe.py      # AWS Transcribe Streaming (sole provider)
+│   │   ├── demo_mode.py           # scripted text-injection stand-in
+│   │   └── fixtures/
+│   ├── notifications/             # BOUNDARY 2: DecisionRecord -> Slack DM, and back
+│   │   ├── notification_pipeline.py
+│   │   ├── cedar_policy.py
+│   │   ├── answer_drafter.py
+│   │   ├── slack_notifier.py      # outbound DM
+│   │   ├── slack_webhook.py       # inbound interactivity
+│   │   └── policies/
+│   ├── decision_detector.py       # shared core: detection pipeline + DecisionRecord
+│   ├── decision_store.py          # shared core: persistence
 │   ├── database.py
-│   └── demo_mode.py
+│   ├── opensearch_client.py
+│   ├── session_connections.py
+│   ├── groq_llm.py
+│   └── config.py
 └── slack-app/           # Slack app configuration
 ```
+
+## Module boundaries (backend)
+
+The backend is split into two bounded sides with a shared core between them:
+
+- **`transcription/`** owns everything from audio to `TranscriptEvent`. The `amazon_transcribe`
+  SDK is imported in `transcription/aws_transcribe.py` and nowhere else, and no AWS-specific type
+  is allowed past `asr_base.TranscriptEvent`. This package knows nothing about decisions, Cedar,
+  or Slack.
+- **`notifications/`** owns everything from an accepted `DecisionRecord` to an outbound Slack DM
+  and the inbound button click that comes back. `slack_sdk` is imported only inside this package.
+  It knows nothing about audio, ASR providers, or `TranscriptEvent`.
+- **The shared core** (`decision_detector.py`, `decision_store.py`, `database.py`,
+  `opensearch_client.py`, `session_connections.py`, `groq_llm.py`, `config.py`) sits between them
+  and imports neither boundary's internals — `decision_detector.py` takes only `TranscriptEvent`
+  from `transcription`, and hands finished batches to an injected callback rather than calling
+  Slack itself.
+- **`main.py` is the composition root** — the only module that imports both sides, and where the
+  notification pipeline is attached to `decision_pipeline.on_decision_batch`. Each package's
+  `__init__.py` states its contract and re-exports exactly what crosses outward
+  (`transcription`: the contract types; `notifications`: `make_notification_pipeline` and
+  `slack_webhook_router`). Import across the boundary through those names, not by reaching into a
+  submodule, and keep provider SDKs behind the package that owns them.
 
 ## Tech stack
 
@@ -169,6 +203,18 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
   separate context list) — `state.buffer = window_events[-3:]` after each close — so both Tier 1's
   regex and Tier 2's LLM call see carried lines alongside new ones. Window closes at 30s elapsed
   (by event timestamp, not wall clock) or 10 segments, whichever first.
+- **Tier 1 has a sticky-window extension** (`_NAME_MENTION_STICKY_SECONDS`, `_SessionState.
+  last_name_mention_at`): a real conversation typically says a watched name once and then keeps
+  addressing that person with "you"/"your" — the name itself never reappears. With only 3 lines of
+  carry-forward, the window containing the *actual* request ("can you review the API", "send us the
+  link") could fall entirely outside the carried text, so Tier 1's regex never matched it and it
+  never reached Tier 2 at all — not stored, not logged, not denied, simply dropped before entering
+  the pipeline. Confirmed against a real live-meeting transcript: a follow-up request one window
+  after the name was said was silently skipped until this fix. The window immediately following a
+  real name match now stays Tier-1-eligible even with no literal re-mention, decaying after
+  `_WINDOW_SECONDS * 2` (60s) so it doesn't stay open indefinitely. None of the existing decision_
+  detector fixtures exercise two close-in-time windows (they're single-window or spaced by design),
+  so this didn't change any documented test's expected behavior.
 - **Debounce timer is real wall-clock**, `asyncio.sleep(settings.debounce_window_seconds)` (12s
   default), separate from the window-closing logic above. Tests shorten
   `settings.debounce_window_seconds` directly (it's a mutable pydantic-settings singleton) rather
@@ -251,6 +297,18 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 - **Slack scopes:** `slack-app/manifest.yaml` needs `users:read.email` in addition to
   `chat:write`/`im:write` — `slack_notifier.py` resolves an email `slack_target` via
   `users.lookupByEmail` before DMing.
+- **Slack app config is a live setup gap, verified empirically.** The installed bot currently
+  carries only `channels:history,chat:write,commands,chat:write.public,channels:read`. Three
+  things must be fixed in the Slack app config (a human-only step) before a DM can actually be
+  delivered, none of which are code problems — message composition itself is verified working:
+  1. **Enable App Home → Messages Tab** ("Allow users to send Slash commands and messages from
+     the messages tab"). Without it `chat.postMessage` to a user returns `messages_tab_disabled`,
+     which is the error a real send hits today.
+  2. **Add `im:write`** — required to open the DM conversation for a user-ID `slack_target`.
+     Without it `conversations.open` returns `missing_scope`.
+  3. **Add `users:read.email`** — only needed if `slack_target` is an email rather than a user ID.
+     Without it `users.lookupByEmail` returns `missing_scope`.
+  Reinstall the app after changing scopes, or the token keeps the old set.
 
 **Phase 5 (persistence + OpenSearch search) — originally built on SQLite, migrated to PostgreSQL;
 see the migration note after Phase 6 for the swap itself:**
@@ -262,7 +320,12 @@ see the migration note after Phase 6 for the swap itself:**
 - **Schema creation happens in `main.py`'s `lifespan` handler**, not at module import —
   `async with engine.begin()` needs a running event loop. No Alembic/migrations —
   `create_all()` only creates tables/types that don't exist yet, so a schema change means dropping
-  and recreating the dev database, not migrating it in place.
+  and recreating the dev database, not migrating it in place. **This has already bitten once:** the
+  deployed Neon database still held the pre-`mention_type` schema long after that migration landed,
+  so every `decision_store` read and write failed against it (`column decisions.mention_type does
+  not exist`) while startup stayed silent — `create_all()` saw the table existed and left it alone.
+  The table was dropped and recreated to fix it. If a schema change lands, do that explicitly;
+  don't assume startup reconciles it.
 - **Postgres handles concurrent `create()`/`update_status()` calls** (decision creation vs. the
   Slack webhook's status updates) natively via MVCC — no journal-mode workaround needed.
 - **A plain (non-timezone) DateTime column strips tzinfo on the way back out**, regardless of
@@ -414,7 +477,7 @@ see the migration note after Phase 6 for the swap itself:**
 
 - **Deepgram is gone entirely, not just de-emphasized.** `DeepgramProvider`, its config
   (`DEEPGRAM_API_KEY`, `ASR_PROVIDER`), and the fallback-on-AWS-failure logic are all deleted, not
-  commented out. `transcribe_handler.get_asr_provider()` constructs and starts
+  commented out. `transcription.aws_transcribe.get_asr_provider()` constructs and starts
   `AWSTranscribeProvider` directly and unconditionally; a failure to start now propagates straight
   to the caller (`main.py`'s `ws_transcribe`, which still closes the socket with code 1011 on any
   `get_asr_provider` exception — that catch-all was never Deepgram-specific). The `ASRProvider`
