@@ -122,6 +122,25 @@ class Decision(Base):
     approved_by: Mapped[str | None] = mapped_column(default=None)
 
 
+class TranscriptLine(Base):
+    """Every final (never partial) TranscriptEvent, persisted durably
+    so the full meeting transcript survives a panel reopen/reconnect
+    instead of existing only as a live WebSocket relay. A brand new,
+    purely additive table — create_all() adds it alongside the
+    existing decisions table without touching that table's own schema.
+    See transcript_store.py for the persistence/read functions backed
+    by this model."""
+
+    __tablename__ = "transcript_lines"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(index=True)
+    speaker: Mapped[str]
+    text: Mapped[str]
+    confidence: Mapped[float]
+    timestamp: Mapped[datetime] = mapped_column(index=True)
+
+
 async def create_all() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

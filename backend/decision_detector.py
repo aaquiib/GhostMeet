@@ -58,11 +58,14 @@ class MentionType(str, Enum):
 
 
 def is_actionable(mention_type: MentionType) -> bool:
-    """True for mention types that proceed to the debounce/batch window
-    and notification pipeline; False for ones that are still persisted
-    via decision_store.create() (for search/history) but never notified.
-    This is the sole actionability signal now — there is no separate
-    is_decision field to potentially disagree with it."""
+    """True for mention types that pose an actual question/request —
+    DIRECT_REQUEST/ACTION_REQUIRED. No longer gates whether a mention
+    reaches notification at all (every type does, now — see CLAUDE.md's
+    non-negotiable-behaviors note); this is used downstream
+    (notifications/notification_pipeline.py) purely to decide whether
+    drafting a real "suggested answer" makes sense, since there's
+    nothing to answer for an INFORMATIONAL/REFERENCE/NO_ACTION
+    mention."""
     return mention_type in (MentionType.DIRECT_REQUEST, MentionType.ACTION_REQUIRED)
 
 
@@ -567,15 +570,13 @@ class DecisionPipeline:
             except Exception:
                 logger.exception("[meeting_id=%s] failed to persist decision %s", meeting_id, record.id)
 
-        if not is_actionable(record.mention_type):
-            logger.info(
-                "[meeting_id=%s] stored, not notified: %s (%r)",
-                meeting_id,
-                record.mention_type.value,
-                record.decision_text,
-            )
-            return
-
+        # Every mention type now proceeds to notification, not just
+        # DIRECT_REQUEST/ACTION_REQUIRED — the user wants FYI-level
+        # visibility (INFORMATIONAL/REFERENCE/NO_ACTION mentions too),
+        # not just ones needing their direct input. is_actionable()
+        # itself is kept (still used downstream to decide whether a
+        # drafted answer makes sense for a given type — there's no
+        # real question to answer for a NO_ACTION mention).
         async with state.lock:
             candidate = (record.decision_text, record.mention_quote)
             if _is_duplicate(candidate, state.recent_decisions):

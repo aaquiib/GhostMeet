@@ -13,12 +13,18 @@ has no per-instance path to isolate, since every instance talks to the
 same database.py engine. Each test's decisions stay disambiguated by
 meeting_id, same as production.
 
-Covers the mention-type migration (CLAUDE.md's non-negotiable behavior:
-only DIRECT_REQUEST/ACTION_REQUIRED reach Slack): every classify_fn
-below returns the new mention_type/mention_quote schema instead of the
-old is_decision boolean, and the block-structure assertions match the
-new single "✓ Done" button layout (slack_notifier.py) rather than the
-old three-button (Approve/Reject/Join & Answer Live) one.
+Covers the mention-type migration: every classify_fn below returns the
+mention_type/mention_quote schema instead of the old is_decision
+boolean, and the block-structure assertions match the single "✓ Read"
+button layout (slack_notifier.py) rather than the old three-button
+(Approve/Reject/Join & Answer Live) one.
+
+CLAUDE.md's non-negotiable behavior here changed from the original
+design: ALL FIVE mention types now reach Slack (previously only
+DIRECT_REQUEST/ACTION_REQUIRED did) — the user wants FYI-level
+visibility into the meeting, not just moments needing direct input.
+INFORMATIONAL/REFERENCE/NO_ACTION get _NO_DRAFT_NEEDED_TEXT in place of
+a real drafted answer, since there's no question to draft an answer to.
 """
 
 import asyncio
@@ -33,7 +39,7 @@ from config import settings
 from decision_detector import MentionType, decision_pipeline
 from decision_store import decision_store as shared_decision_store
 from notifications import answer_drafter, cedar_policy, slack_notifier
-from notifications.notification_pipeline import make_notification_pipeline
+from notifications.notification_pipeline import _NO_DRAFT_NEEDED_TEXT, make_notification_pipeline
 from tests.fixtures.decision_fixtures import (
     MEETING_ID,
     action_required_mention,
@@ -179,16 +185,16 @@ async def test_direct_request_sends_one_slack_message_with_new_block_layout(
     assert "Go with Friday. Source: no prior context." in content_text  # suggested reply
     assert "🟡 Pending" in content_text  # status line
 
-    # single "✓ Done" button, correctly encoded value
+    # single "✓ Read" button, correctly encoded value
     assert len(actions_blocks) == 1
     buttons = actions_blocks[0]["elements"]
     assert len(buttons) == 1
-    assert buttons[0]["text"]["text"] == "✓ Done"
-    assert buttons[0]["action_id"] == "decision_done"
+    assert buttons[0]["text"]["text"] == "✓ Read"
+    assert buttons[0]["action_id"] == "decision_read"
 
     recent = await fake_decision_store.get_recent(MEETING_ID, limit=10)
     matching = next(r for r in recent if r.decision_text == expected_text)
-    assert buttons[0]["value"] == f"{matching.id}:done"
+    assert buttons[0]["value"] == f"{matching.id}:read"
     assert matching.mention_type == MentionType.DIRECT_REQUEST
 
 
@@ -223,7 +229,7 @@ async def test_action_required_is_stored_and_sends_slack_message(
 
 
 @pytest.mark.asyncio
-async def test_informational_mention_is_stored_but_not_notified(
+async def test_informational_mention_is_notified_without_a_draft(
     monkeypatch, fake_decision_store, captured_slack_calls
 ):
     expected_text = "Sarah kept informed about the migration"
@@ -246,7 +252,14 @@ async def test_informational_mention_is_stored_but_not_notified(
             await decision_pipeline.process_transcript_event(event)
         await asyncio.sleep(0.5)
 
-    assert captured_slack_calls == []
+    # FYI-level visibility: notified like any other type, but with the
+    # no-draft placeholder rather than a real answer_drafter LLM call —
+    # there's no question here to draft an answer to.
+    assert len(captured_slack_calls) == 1
+    section_blocks = [b for b in captured_slack_calls[0]["blocks"] if b["type"] == "section"]
+    content_text = section_blocks[1]["text"]["text"]  # [0] is the intro section
+    assert _NO_DRAFT_NEEDED_TEXT in content_text
+
     recent = await fake_decision_store.get_recent(MEETING_ID, limit=10)
     matching = next(r for r in recent if r.decision_text == expected_text)
     assert matching.mention_type == MentionType.INFORMATIONAL
@@ -254,7 +267,7 @@ async def test_informational_mention_is_stored_but_not_notified(
 
 
 @pytest.mark.asyncio
-async def test_reference_mention_is_stored_but_not_notified(
+async def test_reference_mention_is_notified_without_a_draft(
     monkeypatch, fake_decision_store, captured_slack_calls
 ):
     expected_text = "Sarah's prior approval referenced"
@@ -277,14 +290,18 @@ async def test_reference_mention_is_stored_but_not_notified(
             await decision_pipeline.process_transcript_event(event)
         await asyncio.sleep(0.5)
 
-    assert captured_slack_calls == []
+    assert len(captured_slack_calls) == 1
+    section_blocks = [b for b in captured_slack_calls[0]["blocks"] if b["type"] == "section"]
+    content_text = section_blocks[1]["text"]["text"]  # [0] is the intro section
+    assert _NO_DRAFT_NEEDED_TEXT in content_text
+
     recent = await fake_decision_store.get_recent(MEETING_ID, limit=10)
     matching = next(r for r in recent if r.decision_text == expected_text)
     assert matching.mention_type == MentionType.REFERENCE
 
 
 @pytest.mark.asyncio
-async def test_no_action_mention_is_stored_but_not_notified(
+async def test_no_action_mention_is_notified_without_a_draft(
     monkeypatch, fake_decision_store, captured_slack_calls
 ):
     expected_text = "Small talk mentioning Sarah's name"
@@ -307,14 +324,18 @@ async def test_no_action_mention_is_stored_but_not_notified(
             await decision_pipeline.process_transcript_event(event)
         await asyncio.sleep(0.5)
 
-    assert captured_slack_calls == []
+    assert len(captured_slack_calls) == 1
+    section_blocks = [b for b in captured_slack_calls[0]["blocks"] if b["type"] == "section"]
+    content_text = section_blocks[1]["text"]["text"]  # [0] is the intro section
+    assert _NO_DRAFT_NEEDED_TEXT in content_text
+
     recent = await fake_decision_store.get_recent(MEETING_ID, limit=10)
     matching = next(r for r in recent if r.decision_text == expected_text)
     assert matching.mention_type == MentionType.NO_ACTION
 
 
 @pytest.mark.asyncio
-async def test_three_decisions_send_one_slack_message_with_three_done_buttons(
+async def test_three_decisions_send_one_slack_message_with_three_read_buttons(
     monkeypatch, fake_decision_store, captured_slack_calls
 ):
     def classify_fn(content):
@@ -351,7 +372,7 @@ async def test_three_decisions_send_one_slack_message_with_three_done_buttons(
     assert len(actions_blocks) == 3
     for actions in actions_blocks:
         assert len(actions["elements"]) == 1
-        assert actions["elements"][0]["action_id"] == "decision_done"
+        assert actions["elements"][0]["action_id"] == "decision_read"
 
 
 @pytest.mark.asyncio

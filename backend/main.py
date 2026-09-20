@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import database
 import opensearch_client
 import session_connections
+import transcript_store
 from config import settings  # noqa: F401  (import triggers validation)
 from decision_detector import decision_pipeline, handle_control_message
 from decision_store import decision_store
@@ -72,6 +73,18 @@ async def list_decisions(meeting_id: str) -> dict:
     # only decisions pushed live while this panel is open do.
     decisions = await decision_store.get_recent(meeting_id, limit=200)
     return {"decisions": [d.model_dump(mode="json") for d in decisions]}
+
+
+@app.get("/transcript")
+async def get_transcript(meeting_id: str) -> dict:
+    # Hydrates the side panel's live-chat transcript feed on open/
+    # reopen, the same role list_decisions plays for the decision list
+    # — live updates after that arrive via the "transcript" WebSocket
+    # pushes in transcript_loop/demo_mode.py, not by polling this.
+    # get_recent() already returns plain dicts shaped like that live
+    # frame (including "id"), so no further conversion is needed here.
+    lines = await transcript_store.get_recent(meeting_id, limit=500)
+    return {"lines": lines}
 
 
 @app.get("/search")
@@ -239,7 +252,25 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None):
             # indistinguishable between "nothing was transcribed" and
             # "things were transcribed but never matched Tier 1/Tier 2".
             log.info("transcript: %s: %r (confidence=%.2f)", event.speaker, event.text, event.confidence)
-            await websocket.send_json(event.model_dump(mode="json"))
+            # Persisted before the WS send so the live frame can carry
+            # the same id GET /transcript's hydration will later return
+            # for this exact row — without that shared id, a panel
+            # reopened mid-session could show a duplicated tail where
+            # hydration and the resumed live stream briefly overlap.
+            # Never raises (fail-soft, like decision_store/
+            # opensearch_client) and awaited inline rather than
+            # backgrounded — a Neon insert is fast relative to natural
+            # speech pacing, matching how decision_pipeline.
+            # process_transcript_event below is already awaited inline.
+            line_id = await transcript_store.create(event)
+            # "type": "transcript" tags this frame the same way
+            # decision_batch/decision_status_update already are, so
+            # offscreen.js can dispatch on payload.type instead of
+            # duck-typing the shape (TranscriptEvent itself carries no
+            # type/id field — both are added only at the send site).
+            await websocket.send_json(
+                {**event.model_dump(mode="json"), "type": "transcript", "id": str(line_id) if line_id else None}
+            )
             # process_transcript_event only ever blocks synchronously
             # on cheap buffering/regex work — the LLM call it may
             # trigger runs as an internally-managed background task,

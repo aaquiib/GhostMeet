@@ -27,7 +27,7 @@ Ghost does not dial into a meeting unattended. "Can't attend" means a muted brow
 - **Cedar policy check gates every notification.** "Deny" means log the decision, send nothing.
 - **Stop condition:** manual "Stop Ghost" control in the side panel, plus detecting the Meet tab closing.
 - **Consent indicator:** a persistent "Ghost is listening" element in the side panel whenever capture is active.
-- Only DIRECT_REQUEST and ACTION_REQUIRED mention types reach Slack; INFORMATIONAL, REFERENCE, and NO_ACTION mentions are stored but never notified.
+- **All five mention types reach Slack** (changed from the original design): DIRECT_REQUEST, ACTION_REQUIRED, INFORMATIONAL, REFERENCE, and NO_ACTION are all notified, not just the two actionable types. Deliberate: the user wants FYI-level visibility into what's happening in the meeting, not just moments needing their direct input. Only DIRECT_REQUEST/ACTION_REQUIRED get a real drafted answer (`notifications/notification_pipeline.py`'s `_NO_DRAFT_NEEDED_TEXT` placeholder is used for the other three, with no LLM call — there's no real question to draft an answer to). `is_actionable()` (`decision_detector.py`) is kept for exactly this drafting decision even though it no longer gates notification itself.
 
 ## Repo structure
 
@@ -55,7 +55,8 @@ ghost/
 │   │   ├── slack_webhook.py       # inbound interactivity
 │   │   └── policies/
 │   ├── decision_detector.py       # shared core: detection pipeline + DecisionRecord
-│   ├── decision_store.py          # shared core: persistence
+│   ├── decision_store.py          # shared core: decision persistence
+│   ├── transcript_store.py        # shared core: full-transcript persistence (Neon)
 │   ├── database.py
 │   ├── opensearch_client.py
 │   ├── session_connections.py
@@ -75,11 +76,11 @@ The backend is split into two bounded sides with a shared core between them:
 - **`notifications/`** owns everything from an accepted `DecisionRecord` to an outbound Slack DM
   and the inbound button click that comes back. `slack_sdk` is imported only inside this package.
   It knows nothing about audio, ASR providers, or `TranscriptEvent`.
-- **The shared core** (`decision_detector.py`, `decision_store.py`, `database.py`,
-  `opensearch_client.py`, `session_connections.py`, `groq_llm.py`, `config.py`) sits between them
-  and imports neither boundary's internals — `decision_detector.py` takes only `TranscriptEvent`
-  from `transcription`, and hands finished batches to an injected callback rather than calling
-  Slack itself.
+- **The shared core** (`decision_detector.py`, `decision_store.py`, `transcript_store.py`,
+  `database.py`, `opensearch_client.py`, `session_connections.py`, `groq_llm.py`, `config.py`)
+  sits between them and imports neither boundary's internals — `decision_detector.py` takes only
+  `TranscriptEvent` from `transcription`, and hands finished batches to an injected callback
+  rather than calling Slack itself.
 - **`main.py` is the composition root** — the only module that imports both sides, and where the
   notification pipeline is attached to `decision_pipeline.on_decision_batch`. Each package's
   `__init__.py` states its contract and re-exports exactly what crosses outward
@@ -518,6 +519,59 @@ see the migration note after Phase 6 for the swap itself:**
 - **Every other test suite (Phase 3, 4, 5, 6) re-ran unmodified against Postgres and all pass** —
   this is the actual proof the store-interface swap didn't break anything upstream, same principle
   Phase 5's original SQLite migration used.
+
+**Phase 7 (live-chat transcript feed + transcript persistence):**
+
+- **The full transcript is now persisted, not just decisions.** `backend/transcript_store.py`
+  (mirroring `decision_store.py`'s shape) owns a new, purely additive `transcript_lines` Postgres
+  table (`database.TranscriptLine`) — every final `TranscriptEvent` is written here from
+  `main.py`'s `transcript_loop` and `demo_mode.py`'s `send_script`, the same two places that
+  already feed `decision_pipeline.process_transcript_event`. `create()` returns the row's
+  generated id and never raises (fail-soft, same principle `opensearch_client.py`/
+  `decision_store.py` already follow) — a storage hiccup must never interrupt a live session.
+- **`GET /transcript?meeting_id=`** is the new endpoint hydrating the side panel's transcript feed
+  on open/reopen, the same role `GET /decisions` plays for the decision list. Returns oldest-first
+  (unlike `GET /decisions`'s newest-first) since a transcript reads top-to-bottom.
+  `transcript_store.get_recent()` returns plain dicts (not `TranscriptEvent`, which has no `id`
+  field and no other consumer needs one) shaped identically to the live WebSocket frame below, so
+  the client's dedupe-by-id logic doesn't need two different shapes.
+- **The live "transcript" WebSocket frame carries an explicit `"type": "transcript"` and `"id"`**,
+  added only at the two send sites (not on `TranscriptEvent` itself, which has no `type`/`id`
+  field and is used elsewhere in-process where neither is needed). The shared id between the live
+  push and later hydration is what lets a panel reopened mid-session dedupe correctly if the two
+  ever briefly overlap — without it, a reopen could show a duplicated tail of lines.
+- **`extension/offscreen.js` previously received but silently dropped every transcript event**
+  (`default: break` — left for "whichever future phase relays them"). It now recognizes
+  `payload.type === 'transcript'` and relays a `TRANSCRIPT_EVENT` message
+  (`extension/messages.js`) carrying `id`/`speaker`/`text`/`timestamp`/`confidence` to the side
+  panel, the same relay pattern `decision_batch`/`decision_status_update` already use.
+- **`sidepanel.js`'s new transcript feed is a bottom-anchored, auto-scrolling live-chat layout**
+  (`#transcript-feed`, a fixed-height scrollable container, not page-level scroll) — newest line
+  at the bottom, older ones pushed up as the view tracks it. Auto-scroll only continues while the
+  user is within `TRANSCRIPT_STICKY_BOTTOM_PX` (48px) of the bottom; scrolling up to read history
+  stops it and shows a "↓ New messages" jump button instead of yanking the view back down.
+  `panelState.transcriptLines` is capped at `TRANSCRIPT_LINE_CAP` (300) in memory/DOM for a long
+  meeting — older lines stay durable in Neon and are still returned by `GET /transcript`, just not
+  all held in the live feed at once.
+- **A notified decision's `mention_quote` is matched against transcript lines entirely
+  client-side**, not written by the backend — `isTranscriptLineTriggered()` in `sidepanel.js`
+  checks substring containment then falls back to word-overlap (mirroring
+  `decision_detector.py`'s own `_word_overlap`/dedup approach, at a looser 0.5 threshold than the
+  backend's 0.6 since ASR line boundaries and a freshly-drafted quote don't always segment
+  identically). Only decisions with a `mention_quote` are checked — historical decisions that
+  never reached notification don't have one. Recomputed on every render from both lists in
+  current state (not written once at receipt time), so the highlight is correct regardless of
+  whether the transcript line or the decision push arrives first.
+- **The entrance animation only plays once per line, not on every render.** `renderTranscriptFeed`
+  fully rebuilds all line elements on every render (required for the retroactive highlighting
+  above — an older, already-rendered line can gain `.triggered` when a later decision arrives), so
+  without gating the animation behind a `.transcript-line-enter` class applied only to
+  not-yet-seen ids (`animatedLineIds`, module-level, presentational only), every already-visible
+  line would replay the slide-in animation on every new message — visible as the whole feed
+  flickering rather than one new line arriving.
+- **The decision list stays where it was, unchanged** — the transcript feed was added as a new
+  section above it, not a replacement; the decision list is still useful for search/status
+  tracking, a separate concern from the live transcript view.
 
 ## Conventions
 

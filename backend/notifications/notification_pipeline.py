@@ -12,13 +12,22 @@ import asyncio
 import logging
 
 import session_connections
-from decision_detector import DecisionRecord, decision_pipeline
+from decision_detector import DecisionRecord, decision_pipeline, is_actionable
 from decision_store import DecisionStore
 from notifications.answer_drafter import draft_answer
 from notifications.cedar_policy import check_decision_policy, classify_decision_type
 from notifications.slack_notifier import send_batch_notification
 
 logger = logging.getLogger("ghost.notify")
+
+# Every mention type now reaches Slack, not just DIRECT_REQUEST/
+# ACTION_REQUIRED (see decision_detector.py's process_transcript_event
+# — the actionability gate that used to stop notification there was
+# removed). But INFORMATIONAL/REFERENCE/NO_ACTION mentions pose no
+# actual question, so running draft_answer's LLM call on them would be
+# asking it to invent a "suggested reply" to something that was never
+# a question — this placeholder is used instead, with no LLM call.
+_NO_DRAFT_NEEDED_TEXT = "No response needed — shared for your awareness."
 
 
 def make_notification_pipeline(decision_store: DecisionStore):
@@ -56,9 +65,18 @@ def make_notification_pipeline(decision_store: DecisionStore):
 
         drafts: list[str] = []
         if allowed:
-            # Independent LLM calls — run concurrently rather than one
-            # at a time.
-            drafts = await asyncio.gather(*(draft_answer(decision, meeting_id) for decision in allowed))
+            # Only decisions with an actual question/request get a real
+            # drafted answer — run those concurrently (independent LLM
+            # calls), then rebuild the full per-decision list, filling
+            # in the no-draft placeholder for FYI-type mentions without
+            # spending an LLM call on them.
+            draftable = [d for d in allowed if is_actionable(d.mention_type)]
+            draft_results = await asyncio.gather(*(draft_answer(d, meeting_id) for d in draftable))
+            results_by_id = dict(zip((d.id for d in draftable), draft_results))
+            drafts = [
+                results_by_id[d.id] if d.id in results_by_id else _NO_DRAFT_NEEDED_TEXT
+                for d in allowed
+            ]
 
         # Pushed after Cedar + drafting complete, so the panel gets the
         # full picture in one message: every decision in the batch
