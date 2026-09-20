@@ -285,6 +285,18 @@ Build phase by phase, in this order. Each phase has its own exit criteria — tr
 - **Slack scopes:** `slack-app/manifest.yaml` needs `users:read.email` in addition to
   `chat:write`/`im:write` — `slack_notifier.py` resolves an email `slack_target` via
   `users.lookupByEmail` before DMing.
+- **Slack app config is a live setup gap, verified empirically.** The installed bot currently
+  carries only `channels:history,chat:write,commands,chat:write.public,channels:read`. Three
+  things must be fixed in the Slack app config (a human-only step) before a DM can actually be
+  delivered, none of which are code problems — message composition itself is verified working:
+  1. **Enable App Home → Messages Tab** ("Allow users to send Slash commands and messages from
+     the messages tab"). Without it `chat.postMessage` to a user returns `messages_tab_disabled`,
+     which is the error a real send hits today.
+  2. **Add `im:write`** — required to open the DM conversation for a user-ID `slack_target`.
+     Without it `conversations.open` returns `missing_scope`.
+  3. **Add `users:read.email`** — only needed if `slack_target` is an email rather than a user ID.
+     Without it `users.lookupByEmail` returns `missing_scope`.
+  Reinstall the app after changing scopes, or the token keeps the old set.
 
 **Phase 5 (persistence + OpenSearch search) — originally built on SQLite, migrated to PostgreSQL;
 see the migration note after Phase 6 for the swap itself:**
@@ -296,7 +308,12 @@ see the migration note after Phase 6 for the swap itself:**
 - **Schema creation happens in `main.py`'s `lifespan` handler**, not at module import —
   `async with engine.begin()` needs a running event loop. No Alembic/migrations —
   `create_all()` only creates tables/types that don't exist yet, so a schema change means dropping
-  and recreating the dev database, not migrating it in place.
+  and recreating the dev database, not migrating it in place. **This has already bitten once:** the
+  deployed Neon database still held the pre-`mention_type` schema long after that migration landed,
+  so every `decision_store` read and write failed against it (`column decisions.mention_type does
+  not exist`) while startup stayed silent — `create_all()` saw the table existed and left it alone.
+  The table was dropped and recreated to fix it. If a schema change lands, do that explicitly;
+  don't assume startup reconciles it.
 - **Postgres handles concurrent `create()`/`update_status()` calls** (decision creation vs. the
   Slack webhook's status updates) natively via MVCC — no journal-mode workaround needed.
 - **A plain (non-timezone) DateTime column strips tzinfo on the way back out**, regardless of
